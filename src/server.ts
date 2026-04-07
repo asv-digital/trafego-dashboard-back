@@ -12,6 +12,11 @@ import salesRoutes from "./routes/sales";
 import placementMetricsRoutes from "./routes/placement-metrics";
 import actionsRoutes from "./routes/actions";
 import creativeLifecycleRoutes from "./routes/creative-lifecycle";
+import briefingRoutes from "./routes/briefing";
+import profitRoutes from "./routes/profit";
+import goalsRoutes from "./routes/goals";
+import notificationsRoutes from "./routes/notifications";
+import testsRoutes from "./routes/tests";
 import { startScheduler } from "./agent/scheduler";
 
 const app = express();
@@ -32,6 +37,11 @@ app.use("/api/sales", salesRoutes);
 app.use("/api/placement-metrics", placementMetricsRoutes);
 app.use("/api/actions", actionsRoutes);
 app.use("/api/creatives/lifecycle", creativeLifecycleRoutes);
+app.use("/api/briefing", briefingRoutes);
+app.use("/api/profit", profitRoutes);
+app.use("/api/goals", goalsRoutes);
+app.use("/api/notifications", notificationsRoutes);
+app.use("/api/tests", testsRoutes);
 
 // Health check (Melhoria 19)
 app.get("/api/health", async (_req, res) => {

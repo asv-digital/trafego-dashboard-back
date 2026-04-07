@@ -168,3 +168,50 @@ model ActionLog {
   source     String   @default("dashboard")
   executedAt DateTime @default(now())
 }
+
+// Melhoria 31: Metas mensais
+model MonthlyGoal {
+  id          String   @id @default(uuid())
+  month       String   @unique
+  targetSales Int
+  targetCpa   Float
+  targetRoas  Float
+  targetProfit Float?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Melhoria 32: Notificações
+model NotificationConfig {
+  id        String   @id @default(uuid())
+  config    Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model NotificationLog {
+  id      String   @id @default(uuid())
+  rule    String
+  message String
+  channel String
+  status  String
+  sentAt  DateTime @default(now())
+}
+
+// Melhoria 33: Testes A/B
+model CreativeTest {
+  id                 String    @id @default(uuid())
+  name               String
+  status             String    @default("running")
+  adsetId            String
+  variantA           Json
+  variantB           Json
+  startDate          DateTime
+  endDate            DateTime?
+  minDays            Int       @default(5)
+  minSpendPerVariant Float     @default(150)
+  winner             String?
+  confidence         Float?
+  decidedAt          DateTime?
+  createdAt          DateTime  @default(now())
+}

@@ -525,4 +525,219 @@ router.get("/asc-performance", async (_req: Request, res: Response) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /budget-rebalance — Budget rebalance recommendations (Melhoria 29)
+// ---------------------------------------------------------------------------
+router.get("/budget-rebalance", async (_req: Request, res: Response) => {
+  try {
+    const now = new Date();
+    const sevenDaysAgo = new Date(now);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const campaigns = await prisma.campaign.findMany({
+      where: { status: "Ativa" },
+      include: {
+        metrics: {
+          where: { date: { gte: sevenDaysAgo, lte: now } },
+          orderBy: { date: "desc" },
+        },
+      },
+    });
+
+    const recommendations = campaigns
+      .map((campaign) => {
+        const metrics = campaign.metrics;
+        if (metrics.length === 0) return null;
+
+        const totalSpend = metrics.reduce((s, m) => s + m.investment, 0);
+        const totalSales = metrics.reduce((s, m) => s + m.sales, 0);
+        const avgCpa = totalSales > 0 ? totalSpend / totalSales : totalSpend > 0 ? 999 : 0;
+        const dailyBudget = campaign.dailyBudget;
+
+        let suggestedBudget: number;
+        let action: string;
+        let reason: string;
+
+        if (avgCpa < 50 && totalSales >= 3) {
+          // Top performer: +30%
+          suggestedBudget = parseFloat((dailyBudget * 1.3).toFixed(2));
+          action = "increase";
+          reason = `CPA de R$${avgCpa.toFixed(2)} com ${totalSales} vendas. Top performer, aumentar 30%.`;
+        } else if (avgCpa > 70 && totalSales > 0) {
+          // Underperformer: -40%
+          suggestedBudget = parseFloat((dailyBudget * 0.6).toFixed(2));
+          action = "decrease";
+          reason = `CPA de R$${avgCpa.toFixed(2)} acima do ideal. Reduzir 40%.`;
+        } else if (totalSales === 0 && totalSpend > 150) {
+          // Pause: zero budget
+          suggestedBudget = 0;
+          action = "pause";
+          reason = `R$${totalSpend.toFixed(2)} investidos sem vendas. Pausar campanha.`;
+        } else {
+          // Maintain
+          suggestedBudget = dailyBudget;
+          action = "maintain";
+          reason = `Performance moderada. Manter budget atual.`;
+        }
+
+        return {
+          campaign_id: campaign.id,
+          campaign_name: campaign.name,
+          current_daily_budget: dailyBudget,
+          suggested_daily_budget: suggestedBudget,
+          budget_change: parseFloat((suggestedBudget - dailyBudget).toFixed(2)),
+          budget_change_pct: dailyBudget > 0 ? parseFloat((((suggestedBudget - dailyBudget) / dailyBudget) * 100).toFixed(1)) : 0,
+          avg_cpa: parseFloat(avgCpa.toFixed(2)),
+          total_sales_7d: totalSales,
+          total_spend_7d: parseFloat(totalSpend.toFixed(2)),
+          action,
+          reason,
+        };
+      })
+      .filter(Boolean) as NonNullable<ReturnType<typeof Array.prototype.map>[number]>[];
+
+    const totalDailyBudget = recommendations.reduce((s: number, r: any) => s + r.current_daily_budget, 0);
+    const suggestedTotalBudget = recommendations.reduce((s: number, r: any) => s + r.suggested_daily_budget, 0);
+    const rebalanceDiff = suggestedTotalBudget - totalDailyBudget;
+
+    const increases = recommendations.filter((r: any) => r.action === "increase").length;
+    const decreases = recommendations.filter((r: any) => r.action === "decrease").length;
+    const pauses = recommendations.filter((r: any) => r.action === "pause").length;
+    const maintains = recommendations.filter((r: any) => r.action === "maintain").length;
+
+    res.json({
+      totalDailyBudget: parseFloat(totalDailyBudget.toFixed(2)),
+      suggestedTotalBudget: parseFloat(suggestedTotalBudget.toFixed(2)),
+      rebalance_diff: parseFloat(rebalanceDiff.toFixed(2)),
+      recommendations,
+      summary: {
+        total_campaigns: recommendations.length,
+        increase: increases,
+        decrease: decreases,
+        pause: pauses,
+        maintain: maintains,
+        message: `${increases} para escalar, ${decreases} para reduzir, ${pauses} para pausar, ${maintains} mantidos.`,
+      },
+    });
+  } catch (err: unknown) {
+    const error = err as { message?: string };
+    console.error("[metrics] Error computing budget rebalance:", error.message);
+    res.json({
+      totalDailyBudget: 0,
+      suggestedTotalBudget: 0,
+      rebalance_diff: 0,
+      recommendations: [],
+      summary: { total_campaigns: 0, increase: 0, decrease: 0, pause: 0, maintain: 0, message: "Erro ao calcular rebalanceamento." },
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /audience-overlap — Audience overlap heuristic (Melhoria 30)
+// ---------------------------------------------------------------------------
+router.get("/audience-overlap", async (_req: Request, res: Response) => {
+  const META_BASE = "https://graph.facebook.com/v19.0";
+  const metaToken = process.env.META_ACCESS_TOKEN || "";
+  const metaAccountId = process.env.META_AD_ACCOUNT_ID || "";
+
+  try {
+    if (!metaToken || !metaAccountId) {
+      res.json({ pairs: [], total_waste_estimate: 0, message: "Meta API nao configurada." });
+      return;
+    }
+
+    // Fetch adset-level insights for last 7 days
+    const url = new URL(`${META_BASE}/${metaAccountId}/insights`);
+    url.searchParams.set("access_token", metaToken);
+    url.searchParams.set("fields", "adset_id,adset_name,reach,impressions,spend");
+    url.searchParams.set("level", "adset");
+    url.searchParams.set("date_preset", "last_7d");
+
+    const response = await fetch(url.toString());
+    const data = (await response.json()) as any;
+
+    if (data.error) {
+      throw { status: response.status, message: data.error.message };
+    }
+
+    const rows: any[] = data.data ?? [];
+
+    if (rows.length < 2) {
+      res.json({ pairs: [], total_waste_estimate: 0, message: "Dados insuficientes para analise de sobreposicao." });
+      return;
+    }
+
+    // Total campaign reach (approximate: sum of unique reaches with overlap)
+    const totalCampaignReach = Math.max(...rows.map((r: any) => parseInt(r.reach || "0"))) * 1.5;
+
+    const adsets = rows.map((r: any) => ({
+      id: r.adset_id,
+      name: r.adset_name || "",
+      reach: parseInt(r.reach || "0"),
+      impressions: parseInt(r.impressions || "0"),
+      spend: parseFloat(r.spend || "0"),
+    }));
+
+    const pairs: any[] = [];
+    let totalWasteEstimate = 0;
+
+    for (let i = 0; i < adsets.length; i++) {
+      for (let j = i + 1; j < adsets.length; j++) {
+        const a = adsets[i];
+        const b = adsets[j];
+
+        if (a.reach === 0 || b.reach === 0) continue;
+
+        // Heuristic overlap estimation
+        const estimatedOverlap = Math.max(0, (a.reach + b.reach - totalCampaignReach)) / Math.min(a.reach, b.reach);
+        const overlapPct = Math.min(estimatedOverlap * 100, 100);
+
+        let severity: "high" | "medium" | "low";
+        let color: string;
+        if (overlapPct > 30) {
+          severity = "high";
+          color = "#e85040";
+        } else if (overlapPct >= 15) {
+          severity = "medium";
+          color = "#f0c040";
+        } else {
+          severity = "low";
+          color = "#50c878";
+        }
+
+        // Only include medium+ overlap
+        if (overlapPct >= 15) {
+          const wastedSpend = (a.spend + b.spend) * (overlapPct / 100) * 0.5;
+          totalWasteEstimate += wastedSpend;
+
+          pairs.push({
+            adset_a: { id: a.id, name: a.name, reach: a.reach },
+            adset_b: { id: b.id, name: b.name, reach: b.reach },
+            overlap_pct: parseFloat(overlapPct.toFixed(1)),
+            severity,
+            color,
+            estimated_wasted_spend: parseFloat(wastedSpend.toFixed(2)),
+          });
+        }
+      }
+    }
+
+    // Sort by overlap desc
+    pairs.sort((a, b) => b.overlap_pct - a.overlap_pct);
+
+    res.json({
+      pairs,
+      total_waste_estimate: parseFloat(totalWasteEstimate.toFixed(2)),
+      adsets_analyzed: adsets.length,
+      message: pairs.length > 0
+        ? `${pairs.length} par(es) com sobreposicao significativa detectada.`
+        : "Nenhuma sobreposicao significativa detectada.",
+    });
+  } catch (err: unknown) {
+    const error = err as { message?: string };
+    console.error("[metrics] Error computing audience overlap:", error.message);
+    res.json({ pairs: [], total_waste_estimate: 0, message: "Erro ao analisar sobreposicao de publicos." });
+  }
+});
+
 export default router;
