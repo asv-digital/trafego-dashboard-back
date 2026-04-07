@@ -25,6 +25,42 @@ function getMetaConfig() {
 const { access_token, ad_account_id } = getMetaConfig();
 
 // ---------------------------------------------------------------------------
+// Naming Convention Helpers
+// ---------------------------------------------------------------------------
+
+function buildCampaignName(params: { type?: string; product?: string; objective?: string }): string {
+  const date = new Date().toISOString().slice(0, 7);
+  const typeMap: Record<string, string> = {
+    remarketing: "RMK",
+    prospeccao: "PROSP",
+    escala: "ESCALA",
+    lookalike: "LAL",
+    advantage_plus: "ASC",
+  };
+  const prefix = typeMap[params.type?.toLowerCase() ?? ""] || (params.type?.toUpperCase() ?? "CAMP");
+  const product = params.product || "56 Skills";
+  const objective = params.objective || "Purchase";
+  return `${prefix} | ${product} | ${objective} | ${date}`;
+}
+
+function buildAdsetName(params: { audience?: string; segmentation?: string }): string {
+  return `${params.audience || "Broad"} | ${params.segmentation || "Default"}`;
+}
+
+function buildAdName(params: { format?: string; hook?: string; version?: number }): string {
+  const formatMap: Record<string, string> = {
+    talking_head: "TH",
+    screen_recording: "SR",
+    carousel: "CARR",
+    image: "IMG",
+    ugc: "UGC",
+    reels: "RL",
+  };
+  const prefix = formatMap[params.format?.toLowerCase() ?? ""] || (params.format?.toUpperCase() ?? "AD");
+  return `${prefix} | ${params.hook || "Default"} | v${params.version || 1}`;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -76,12 +112,16 @@ async function metaGet(endpoint: string, params: Record<string, string> = {}) {
 // ---------------------------------------------------------------------------
 router.post("/campaigns/create", async (req: Request, res: Response) => {
   try {
-    const { name, objective, daily_budget, status } = req.body;
+    const { name, objective, daily_budget, status, auto_name, campaign_type, product } = req.body;
 
-    console.log(`[meta-actions] Creating campaign: ${name}`);
+    const finalName = (auto_name || !name)
+      ? buildCampaignName({ type: campaign_type, product, objective })
+      : name;
+
+    console.log(`[meta-actions] Creating campaign: ${finalName}`);
 
     const data = await metaPost(`${ad_account_id}/campaigns`, {
-      name,
+      name: finalName,
       objective,
       status: status || "PAUSED",
       special_ad_categories: "[]",
@@ -110,13 +150,20 @@ router.post("/adsets/create", async (req: Request, res: Response) => {
       billing_event,
       optimization_goal,
       start_time,
+      auto_name,
+      audience,
+      segmentation,
     } = req.body;
 
-    console.log(`[meta-actions] Creating ad set: ${name}`);
+    const finalName = (auto_name || !name)
+      ? buildAdsetName({ audience, segmentation })
+      : name;
+
+    console.log(`[meta-actions] Creating ad set: ${finalName}`);
 
     const params: Record<string, string> = {
       campaign_id,
-      name,
+      name: finalName,
       daily_budget: String(daily_budget),
       billing_event: billing_event || "IMPRESSIONS",
       optimization_goal,
@@ -284,6 +331,80 @@ router.get("/insights/range", async (req: Request, res: Response) => {
     const error = err as { status?: number; message?: string };
     console.error("[meta-actions] Error fetching insights range:", error.message);
     res.json([]);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 10. GET /insights/pacing — Budget pacing for today (Melhoria 11)
+// ---------------------------------------------------------------------------
+router.get("/insights/pacing", async (_req: Request, res: Response) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const dailyBudget = Number(process.env.META_DAILY_BUDGET) || 500;
+
+  try {
+    console.log("[meta-actions] Fetching pacing insights");
+
+    const data = await metaGet(`${ad_account_id}/insights`, {
+      fields: "spend",
+      date_preset: "today",
+      level: "account",
+    });
+
+    const rows = (data as any).data ?? [];
+    const spentToday = rows.length > 0 ? parseFloat(rows[0].spend || "0") : 0;
+
+    const now = new Date();
+    const percentDayElapsed = parseFloat(
+      ((now.getHours() + now.getMinutes() / 60) / 24 * 100).toFixed(2)
+    );
+    const percentBudgetSpent = dailyBudget > 0
+      ? parseFloat(((spentToday / dailyBudget) * 100).toFixed(2))
+      : 0;
+
+    let pacingStatus: string;
+    if (percentBudgetSpent < percentDayElapsed - 20) {
+      pacingStatus = "underpacing";
+    } else if (percentBudgetSpent > percentDayElapsed + 20) {
+      pacingStatus = "overpacing";
+    } else {
+      pacingStatus = "on_track";
+    }
+
+    const projectedSpend = percentDayElapsed > 0
+      ? parseFloat(((spentToday / percentDayElapsed) * 100).toFixed(2))
+      : 0;
+
+    const messages: Record<string, string> = {
+      underpacing: `Gastando abaixo do esperado. ${percentBudgetSpent.toFixed(1)}% do budget com ${percentDayElapsed.toFixed(1)}% do dia.`,
+      overpacing: `Gastando acima do esperado. ${percentBudgetSpent.toFixed(1)}% do budget com ${percentDayElapsed.toFixed(1)}% do dia.`,
+      on_track: `Pacing saudável. ${percentBudgetSpent.toFixed(1)}% do budget com ${percentDayElapsed.toFixed(1)}% do dia.`,
+    };
+
+    res.json({
+      date: today,
+      daily_budget: dailyBudget,
+      spent_today: spentToday,
+      percent_budget_spent: percentBudgetSpent,
+      percent_day_elapsed: percentDayElapsed,
+      pacing_status: pacingStatus,
+      projected_spend: projectedSpend,
+      message: messages[pacingStatus],
+    });
+  } catch (err: unknown) {
+    const error = err as { status?: number; message?: string };
+    console.error("[meta-actions] Error fetching pacing:", error.message);
+    res.json({
+      date: today,
+      daily_budget: dailyBudget,
+      spent_today: 0,
+      percent_budget_spent: 0,
+      percent_day_elapsed: parseFloat(
+        ((new Date().getHours() + new Date().getMinutes() / 60) / 24 * 100).toFixed(2)
+      ),
+      pacing_status: "unknown",
+      projected_spend: 0,
+      message: "Erro ao buscar dados do Meta. Retornando zeros.",
+    });
   }
 });
 

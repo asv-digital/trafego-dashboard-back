@@ -8,6 +8,7 @@ import webhookRoutes from "./routes/webhooks";
 import agentRoutes from "./routes/agent";
 import metaActionsRoutes from "./routes/meta-actions";
 import salesRoutes from "./routes/sales";
+import placementMetricsRoutes from "./routes/placement-metrics";
 import { startScheduler } from "./agent/scheduler";
 
 const app = express();
@@ -25,6 +26,7 @@ app.use("/api/webhooks", webhookRoutes);
 app.use("/api/agent", agentRoutes);
 app.use("/api/meta-actions", metaActionsRoutes);
 app.use("/api/sales", salesRoutes);
+app.use("/api/placement-metrics", placementMetricsRoutes);
 
 // Health check
 app.get("/api/health", (_req, res) => {

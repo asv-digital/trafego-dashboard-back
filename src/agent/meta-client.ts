@@ -33,10 +33,40 @@ const INSIGHT_FIELDS = [
 export class MetaClient {
   private token: string;
   private accountId: string;
+  private lastRequestTime = 0;
+  private minInterval = 200; // ms between requests
 
   constructor(config: AgentConfig["meta"]) {
     this.token = config.access_token;
     this.accountId = config.ad_account_id;
+  }
+
+  /** Throttled fetch with exponential backoff on 429 */
+  private async throttledFetch(url: string): Promise<Response> {
+    const now = Date.now();
+    const elapsed = now - this.lastRequestTime;
+    if (elapsed < this.minInterval) {
+      await new Promise((r) => setTimeout(r, this.minInterval - elapsed));
+    }
+    this.lastRequestTime = Date.now();
+
+    let retries = 0;
+    const maxRetries = 3;
+
+    while (true) {
+      const res = await fetch(url);
+
+      if (res.status === 429 && retries < maxRetries) {
+        retries++;
+        const backoff = Math.pow(2, retries) * 1000; // 2s, 4s, 8s
+        console.warn(`[MetaClient] Rate limited (429). Retry ${retries}/${maxRetries} after ${backoff}ms`);
+        await new Promise((r) => setTimeout(r, backoff));
+        this.lastRequestTime = Date.now();
+        continue;
+      }
+
+      return res;
+    }
   }
 
   /** Fetch insights for a date range, broken down by campaign + adset + ad */
@@ -45,7 +75,7 @@ export class MetaClient {
     let url = this.buildInsightsUrl(dateFrom, dateTo);
 
     while (url) {
-      const res = await fetch(url);
+      const res = await this.throttledFetch(url);
       if (!res.ok) {
         const err = await res.text();
         throw new Error(`Meta API error ${res.status}: ${err}`);
@@ -69,7 +99,7 @@ export class MetaClient {
       `&limit=100` +
       `&access_token=${this.token}`;
 
-    const res = await fetch(url);
+    const res = await this.throttledFetch(url);
     if (!res.ok) {
       const err = await res.text();
       throw new Error(`Meta API error: ${err}`);

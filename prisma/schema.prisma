@@ -138,3 +138,21 @@ model DailySnapshot {
   source            String   @default("agent")
   createdAt         DateTime @default(now())
 }
+
+// Melhoria 22: CPM por posicionamento
+model PlacementMetric {
+  id             String   @id @default(uuid())
+  date           DateTime
+  campaignId     String?
+  adsetId        String?
+  platform       String
+  position       String
+  impressions    Int
+  spend          Float
+  cpm            Float
+  clicks         Int
+  outboundClicks Int?
+  conversions    Int?
+  cpa            Float?
+  createdAt      DateTime @default(now())
+}

@@ -206,4 +206,200 @@ router.get("/score", async (req: Request, res: Response) => {
   res.json({ score, status, color, breakdown, summary: summaryParts.join(". ") + "." });
 });
 
+// ---------------------------------------------------------------------------
+// GET /frequency-by-adset — Frequency analysis per adset (Melhoria 23)
+// ---------------------------------------------------------------------------
+router.get("/frequency-by-adset", async (req: Request, res: Response) => {
+  const META_BASE = "https://graph.facebook.com/v19.0";
+  const metaToken = process.env.META_ACCESS_TOKEN || "";
+  const metaAccountId = process.env.META_AD_ACCOUNT_ID || "";
+
+  const period = (req.query.period as string) || "7d";
+  const datePresetMap: Record<string, string> = {
+    "7d": "last_7d",
+    "14d": "last_14d",
+    "30d": "last_30d",
+  };
+  const datePreset = datePresetMap[period] || "last_7d";
+
+  const thresholds = {
+    hot: { saturated: 3.0, watch: 2.0, label: "Remarketing" },
+    lookalike: { saturated: 2.5, watch: 1.8, label: "Lookalike" },
+    cold: { saturated: 2.0, watch: 1.5, label: "Cold/Prospecção" },
+  };
+
+  try {
+    const url = new URL(`${META_BASE}/${metaAccountId}/insights`);
+    url.searchParams.set("access_token", metaToken);
+    url.searchParams.set("fields", "adset_name,adset_id,frequency,reach,impressions,spend,actions");
+    url.searchParams.set("level", "adset");
+    url.searchParams.set("date_preset", datePreset);
+
+    const response = await fetch(url.toString());
+    const data = (await response.json()) as any;
+
+    if (data.error) {
+      throw { status: response.status, message: data.error.message };
+    }
+
+    const rows: any[] = data.data ?? [];
+
+    const adsets = rows.map((row: any) => {
+      const name: string = row.adset_name || "";
+      const frequency = parseFloat(row.frequency || "0");
+      const reach = parseInt(row.reach || "0");
+      const impressions = parseInt(row.impressions || "0");
+      const spend = parseFloat(row.spend || "0");
+
+      const actions: any[] = row.actions || [];
+      const purchaseAction = actions.find(
+        (a: any) => a.action_type === "purchase" || a.action_type === "offsite_conversion.fb_pixel_purchase"
+      );
+      const conversions = purchaseAction ? parseInt(purchaseAction.value || "0") : 0;
+
+      const upperName = name.toUpperCase();
+      let audienceType: "hot" | "lookalike" | "cold";
+      if (upperName.includes("RMK") || upperName.includes("REMARKETING")) {
+        audienceType = "hot";
+      } else if (upperName.includes("LAL") || upperName.includes("LOOKALIKE")) {
+        audienceType = "lookalike";
+      } else {
+        audienceType = "cold";
+      }
+
+      const t = thresholds[audienceType];
+      let freqStatus: string;
+      let freqColor: string;
+      if (frequency > t.saturated) {
+        freqStatus = "saturated";
+        freqColor = "#e85040";
+      } else if (frequency >= t.watch) {
+        freqStatus = "watch";
+        freqColor = "#f0c040";
+      } else {
+        freqStatus = "healthy";
+        freqColor = "#50c878";
+      }
+
+      return {
+        adset_id: row.adset_id,
+        adset_name: name,
+        audience_type: audienceType,
+        frequency: parseFloat(frequency.toFixed(2)),
+        reach,
+        impressions,
+        spend: parseFloat(spend.toFixed(2)),
+        conversions,
+        freq_status: freqStatus,
+        freq_color: freqColor,
+        threshold_saturated: t.saturated,
+        threshold_watch: t.watch,
+      };
+    });
+
+    // Sort: saturated first, then watch, then healthy
+    const statusOrder: Record<string, number> = { saturated: 0, watch: 1, healthy: 2 };
+    adsets.sort((a, b) => (statusOrder[a.freq_status] ?? 3) - (statusOrder[b.freq_status] ?? 3));
+
+    res.json({ adsets, thresholds });
+  } catch (err: unknown) {
+    const error = err as { status?: number; message?: string };
+    console.error("[metrics] Error fetching frequency by adset:", error.message);
+    res.json({ adsets: [], thresholds });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /scaling-rules — Scaling recommendations per campaign (Melhoria 24)
+// ---------------------------------------------------------------------------
+router.get("/scaling-rules", async (_req: Request, res: Response) => {
+  try {
+    const now = new Date();
+    const threeDaysAgo = new Date(now);
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+
+    const campaigns = await prisma.campaign.findMany({
+      include: {
+        metrics: {
+          where: { date: { gte: threeDaysAgo, lte: now } },
+          orderBy: { date: "desc" },
+        },
+      },
+    });
+
+    const priorityOrder: Record<string, number> = {
+      critical: 0,
+      danger: 1,
+      warning: 2,
+      success: 3,
+    };
+
+    const recommendations = campaigns
+      .map((campaign) => {
+        const metrics = campaign.metrics;
+        if (metrics.length === 0) return null;
+
+        const totalSpend = metrics.reduce((s, m) => s + m.investment, 0);
+        const totalSales = metrics.reduce((s, m) => s + m.sales, 0);
+        const avgCpa = totalSales > 0 ? totalSpend / totalSales : totalSpend > 0 ? 999 : 0;
+        const totalClicks = metrics.reduce((s, m) => s + m.clicks, 0);
+        const totalImpressions = metrics.reduce((s, m) => s + m.impressions, 0);
+        const daysWithData = metrics.length;
+
+        let action: string;
+        let priority: string;
+        let message: string;
+
+        if (totalSpend > 200 && totalSales === 0) {
+          action = "kill";
+          priority = "critical";
+          message = `R$${totalSpend.toFixed(2)} gastos sem nenhuma venda em ${daysWithData} dias. Pausar imediatamente.`;
+        } else if (avgCpa > 70) {
+          action = "consider_pause";
+          priority = "danger";
+          message = `CPA médio de R$${avgCpa.toFixed(2)} nos últimos ${daysWithData} dias. Considere pausar ou ajustar.`;
+        } else if (avgCpa >= 50 && avgCpa <= 70) {
+          action = "watch";
+          priority = "warning";
+          message = `CPA médio de R$${avgCpa.toFixed(2)}. Monitorar de perto antes de escalar.`;
+        } else if (avgCpa < 50 && totalSales >= 3) {
+          action = "scale_up";
+          priority = "success";
+          message = `CPA de R$${avgCpa.toFixed(2)} com ${totalSales} vendas. Candidata a escalar (+20% budget).`;
+        } else {
+          action = "watch";
+          priority = "warning";
+          message = `CPA de R$${avgCpa.toFixed(2)} com ${totalSales} venda(s). Aguardar mais dados.`;
+        }
+
+        return {
+          campaign_id: campaign.id,
+          campaign_name: campaign.name,
+          status: campaign.status,
+          days_analyzed: daysWithData,
+          total_spend: parseFloat(totalSpend.toFixed(2)),
+          total_sales: totalSales,
+          total_clicks: totalClicks,
+          total_impressions: totalImpressions,
+          avg_cpa: parseFloat(avgCpa.toFixed(2)),
+          action,
+          priority,
+          message,
+        };
+      })
+      .filter(Boolean);
+
+    // Sort by priority (critical first)
+    recommendations.sort(
+      (a, b) => (priorityOrder[a!.priority] ?? 99) - (priorityOrder[b!.priority] ?? 99)
+    );
+
+    res.json(recommendations);
+  } catch (err: unknown) {
+    const error = err as { message?: string };
+    console.error("[metrics] Error computing scaling rules:", error.message);
+    res.json([]);
+  }
+});
+
 export default router;
