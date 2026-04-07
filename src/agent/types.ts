@@ -39,6 +39,10 @@ export interface MetaInsight {
   actions?: Array<{ action_type: string; value: string }>;
   action_values?: Array<{ action_type: string; value: string }>;
   cost_per_action_type?: Array<{ action_type: string; value: string }>;
+  outbound_clicks?: any;
+  outbound_ctr?: string;
+  video_play_actions?: Array<{ action_type: string; value: string }>;
+  video_thruplay_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p25_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p50_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p75_watched_actions?: Array<{ action_type: string; value: string }>;
@@ -95,4 +99,11 @@ export interface ConsolidatedMetric {
   roas: number | null;
   frequency: number;
   hookRate: number | null;
+  landingPageViews: number;
+  initiateCheckouts: number;
+  outboundClicks: number;
+  outboundCtr: number | null;
+  threeSecondViews: number;
+  videoPlays: number;
+  costPerLandingPageView: number | null;
 }

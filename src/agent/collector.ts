@@ -6,7 +6,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
 import type { AgentConfig, MetaInsight, ConsolidatedMetric } from "./types";
-import { MetaClient, getActionValue } from "./meta-client";
+import { MetaClient, getActionValue, getLandingPageViews, getInitiateCheckouts, getOutboundClicks, getVideoPlays, getThreeSecondViews } from "./meta-client";
 import { KirvanoClient } from "./kirvano-client";
 
 // ── Load config (env vars first, fallback to file) ───────────
@@ -122,6 +122,11 @@ function consolidateInsights(
     let frequency = 0;
     let videoViews3s = 0;
     let videoImpressions = 0;
+    let landingPageViews = 0;
+    let initiateCheckouts = 0;
+    let outboundClicks = 0;
+    let threeSecondViews = 0;
+    let videoPlays = 0;
 
     for (const row of rows) {
       investment += parseFloat(row.spend) || 0;
@@ -130,8 +135,12 @@ function consolidateInsights(
       linkClicks += getActionValue(row.actions, "link_click");
       metaPurchases += getActionValue(row.actions, "purchase");
       frequency = Math.max(frequency, parseFloat(row.frequency) || 0);
+      landingPageViews += getLandingPageViews(row.actions);
+      initiateCheckouts += getInitiateCheckouts(row.actions);
+      outboundClicks += getOutboundClicks(row);
+      videoPlays += getVideoPlays(row);
+      threeSecondViews += getThreeSecondViews(row);
 
-      // Hook rate approximation: video views at 25% / impressions for that ad
       const v25 = getActionValue(row.video_p25_watched_actions, "video_view");
       if (v25 > 0) {
         videoViews3s += v25;
@@ -144,7 +153,9 @@ function consolidateInsights(
     const sales = kirvanSales > 0 ? kirvanSales : metaPurchases;
 
     const revenue = sales * biz.net_revenue_per_sale;
-    const hookRate = videoImpressions > 0 ? (videoViews3s / videoImpressions) * 100 : null;
+    const hookRate = impressions > 0 && threeSecondViews > 0 ? (threeSecondViews / impressions) * 100 : (videoImpressions > 0 ? (videoViews3s / videoImpressions) * 100 : null);
+    const outboundCtr = impressions > 0 && outboundClicks > 0 ? (outboundClicks / impressions) * 100 : null;
+    const costPerLpv = landingPageViews > 0 ? investment / landingPageViews : null;
 
     metrics.push({
       date,
@@ -165,6 +176,13 @@ function consolidateInsights(
       roas: investment > 0 ? revenue / investment : null,
       frequency,
       hookRate,
+      landingPageViews,
+      initiateCheckouts,
+      outboundClicks,
+      outboundCtr,
+      threeSecondViews,
+      videoPlays,
+      costPerLandingPageView: costPerLpv,
     });
   }
 
@@ -225,6 +243,16 @@ async function syncToDatabase(metrics: ConsolidatedMetric[]): Promise<void> {
           sales: m.sales,
           frequency: m.frequency,
           hookRate: m.hookRate,
+          landingPageViews: m.landingPageViews || null,
+          initiateCheckouts: m.initiateCheckouts || null,
+          outboundClicks: m.outboundClicks || null,
+          outboundCtr: m.outboundCtr,
+          threeSecondViews: m.threeSecondViews || null,
+          videoPlays: m.videoPlays || null,
+          costPerLandingPageView: m.costPerLandingPageView,
+          clickToPageViewRate: m.landingPageViews > 0 && m.clicks > 0 ? (m.landingPageViews / m.clicks) * 100 : null,
+          pageViewToCheckout: m.initiateCheckouts > 0 && m.landingPageViews > 0 ? (m.initiateCheckouts / m.landingPageViews) * 100 : null,
+          checkoutToSaleRate: m.sales > 0 && m.initiateCheckouts > 0 ? (m.sales / m.initiateCheckouts) * 100 : null,
           observations: `[Auto] Meta ID: ${m.campaignId} | AdSet: ${m.adSetId}`,
         },
       });

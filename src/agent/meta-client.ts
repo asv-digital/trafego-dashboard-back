@@ -20,6 +20,10 @@ const INSIGHT_FIELDS = [
   "cpc",
   "ctr",
   "frequency",
+  "outbound_clicks",
+  "outbound_ctr",
+  "video_play_actions",
+  "video_thruplay_watched_actions",
   "video_p25_watched_actions",
   "video_p50_watched_actions",
   "video_p75_watched_actions",
@@ -111,4 +115,50 @@ export function getCostPerAction(
   if (!costs) return null;
   const found = costs.find((a) => a.action_type === actionType);
   return found ? parseFloat(found.value) : null;
+}
+
+export function getLandingPageViews(actions: MetaInsight["actions"]): number {
+  return getActionValue(actions, "landing_page_view");
+}
+
+export function getInitiateCheckouts(actions: MetaInsight["actions"]): number {
+  return (
+    getActionValue(actions, "initiate_checkout") ||
+    getActionValue(actions, "offsite_conversion.fb_pixel_initiate_checkout")
+  );
+}
+
+export function getOutboundClicks(insight: MetaInsight): number {
+  if (!insight.outbound_clicks) return 0;
+  if (Array.isArray(insight.outbound_clicks)) {
+    const found = insight.outbound_clicks.find(
+      (a: any) => a.action_type === "outbound_click"
+    );
+    return found ? parseInt(found.value) : 0;
+  }
+  return parseInt(String(insight.outbound_clicks)) || 0;
+}
+
+export function getVideoPlays(insight: MetaInsight): number {
+  if (!insight.video_play_actions) return 0;
+  const found = insight.video_play_actions.find(
+    (a: any) => a.action_type === "video_view"
+  );
+  return found ? parseInt(found.value) : 0;
+}
+
+export function getThreeSecondViews(insight: MetaInsight): number {
+  if (insight.video_thruplay_watched_actions) {
+    const found = insight.video_thruplay_watched_actions.find(
+      (a: any) => a.action_type === "video_view"
+    );
+    if (found) return parseInt(found.value);
+  }
+  if (insight.video_p25_watched_actions) {
+    const found = insight.video_p25_watched_actions.find(
+      (a: any) => a.action_type === "video_view"
+    );
+    if (found) return parseInt(found.value);
+  }
+  return 0;
 }

@@ -19,6 +19,7 @@ model Campaign {
 
   metrics   MetricEntry[]
   creatives Creative[]
+  sales     Sale[]
 }
 
 model MetricEntry {
@@ -34,7 +35,23 @@ model MetricEntry {
   frequency    Float?
   hookRate     Float?
   observations String?
-  createdAt    DateTime @default(now())
+
+  // Melhoria 4: Funil completo + Hook Rate + CPLPV
+  landingPageViews       Int?
+  initiateCheckouts      Int?
+  addToCart              Int?
+  costPerPageView        Float?
+  costPerCheckout        Float?
+  costPerLandingPageView Float?
+  clickToPageViewRate    Float?
+  pageViewToCheckout     Float?
+  checkoutToSaleRate     Float?
+  outboundClicks         Int?
+  outboundCtr            Float?
+  threeSecondViews       Int?
+  videoPlays             Int?
+
+  createdAt DateTime @default(now())
 }
 
 model Creative {
@@ -49,4 +66,54 @@ model Creative {
   campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+}
+
+// Melhoria 2: Modelo Sale com atribuição UTM
+model Sale {
+  id                String    @id @default(uuid())
+  date              DateTime
+  amountGross       Float
+  amountNet         Float
+  paymentMethod     String
+  status            String    @default("approved")
+  utmSource         String?
+  utmMedium         String?
+  utmCampaign       String?
+  utmContent        String?
+  utmTerm           String?
+  metaCampaignId    String?
+  metaAdsetId       String?
+  metaAdId          String?
+  customerEmail     String?
+  customerPhone     String?
+  customerName      String?
+  customerFirstName String?
+  customerLastName  String?
+  kirvanoTxId       String    @unique
+  kirvanoCheckoutId String?
+  capiSent          Boolean   @default(false)
+  capiSentAt        DateTime?
+  capiEventId       String?
+  convertedToMentoria  Boolean   @default(false)
+  mentoriaConvertedAt  DateTime?
+  campaignId        String?
+  campaign          Campaign? @relation(fields: [campaignId], references: [id])
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+// Melhoria 3: Carrinho abandonado
+model CartAbandonment {
+  id            String   @id @default(uuid())
+  date          DateTime
+  customerEmail String?
+  customerPhone String?
+  customerName  String?
+  productId     String?
+  utmSource     String?
+  utmCampaign   String?
+  utmContent    String?
+  checkoutUrl   String?
+  recovered     Boolean  @default(false)
+  createdAt     DateTime @default(now())
 }
