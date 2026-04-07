@@ -275,6 +275,85 @@ router.get("/discrepancy", async (req: Request, res: Response) => {
   });
 });
 
+// GET /heatmap — Sales heatmap by day of week and hour (Melhoria 18)
+router.get("/heatmap", async (req: Request, res: Response) => {
+  const where: Record<string, unknown> = { status: "approved" };
+  if (req.query.from || req.query.to) {
+    const dateFilter: Record<string, Date> = {};
+    if (req.query.from) dateFilter.gte = new Date(req.query.from as string);
+    if (req.query.to) dateFilter.lte = new Date(req.query.to as string);
+    where.date = dateFilter;
+  }
+
+  const sales = await prisma.sale.findMany({ where });
+
+  // Build heatmap: 7 days x 24 hours
+  const grid: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+
+  for (const sale of sales) {
+    const day = sale.date.getDay(); // 0=Sunday
+    const hour = sale.date.getHours();
+    grid[day][hour]++;
+  }
+
+  const heatmap: { dayOfWeek: number; hour: number; sales: number }[] = [];
+  for (let d = 0; d < 7; d++) {
+    for (let h = 0; h < 24; h++) {
+      heatmap.push({ dayOfWeek: d, hour: h, sales: grid[d][h] });
+    }
+  }
+
+  // Generate insights
+  const insights: string[] = [];
+  const dayNames = ["Domingo", "Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado"];
+
+  // Best hour overall
+  const hourTotals = Array(24).fill(0);
+  for (let d = 0; d < 7; d++) {
+    for (let h = 0; h < 24; h++) {
+      hourTotals[h] += grid[d][h];
+    }
+  }
+  const bestHour = hourTotals.indexOf(Math.max(...hourTotals));
+  if (hourTotals[bestHour] > 0) {
+    insights.push(`Melhor horario: ${bestHour}h com ${hourTotals[bestHour]} vendas totais.`);
+  }
+
+  // Best day overall
+  const dayTotals = Array(7).fill(0);
+  for (let d = 0; d < 7; d++) {
+    dayTotals[d] = grid[d].reduce((a: number, b: number) => a + b, 0);
+  }
+  const bestDay = dayTotals.indexOf(Math.max(...dayTotals));
+  if (dayTotals[bestDay] > 0) {
+    insights.push(`Melhor dia: ${dayNames[bestDay]} com ${dayTotals[bestDay]} vendas.`);
+  }
+
+  // Dead hours (0 sales across all days)
+  const deadHours = hourTotals
+    .map((total: number, h: number) => (total === 0 ? h : -1))
+    .filter((h: number) => h >= 0);
+  if (deadHours.length > 0 && deadHours.length < 12) {
+    insights.push(`Horarios sem vendas: ${deadHours.map((h: number) => `${h}h`).join(", ")}.`);
+  }
+
+  // Dayparting suggestion
+  const totalSales = sales.length;
+  if (totalSales >= 10) {
+    const top5Hours = hourTotals
+      .map((total: number, h: number) => ({ h, total }))
+      .sort((a: { total: number }, b: { total: number }) => b.total - a.total)
+      .slice(0, 5);
+    const topHoursSales = top5Hours.reduce((s: number, x: { total: number }) => s + x.total, 0);
+    const topPercent = ((topHoursSales / totalSales) * 100).toFixed(1);
+    insights.push(
+      `Sugestao dayparting: concentre orcamento nos horarios ${top5Hours.map((x: { h: number }) => `${x.h}h`).join(", ")} (${topPercent}% das vendas).`
+    );
+  }
+
+  res.json({ heatmap, insights });
+});
+
 // GET /ltv — LTV metrics (Melhoria 21)
 // NOTE: Must be defined before /:id routes to avoid "ltv" matching as :id
 router.get("/ltv", async (_req: Request, res: Response) => {

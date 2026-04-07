@@ -156,3 +156,15 @@ model PlacementMetric {
   cpa            Float?
   createdAt      DateTime @default(now())
 }
+
+// Melhoria 17: Log de ações
+model ActionLog {
+  id         String   @id @default(uuid())
+  action     String
+  entityType String
+  entityId   String
+  entityName String
+  details    String?
+  source     String   @default("dashboard")
+  executedAt DateTime @default(now())
+}

@@ -402,4 +402,127 @@ router.get("/scaling-rules", async (_req: Request, res: Response) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /asc-performance — ASC vs ABO comparison (Melhoria 25)
+// ---------------------------------------------------------------------------
+router.get("/asc-performance", async (_req: Request, res: Response) => {
+  const META_BASE = "https://graph.facebook.com/v19.0";
+  const metaToken = process.env.META_ACCESS_TOKEN || "";
+  const metaAccountId = process.env.META_AD_ACCOUNT_ID || "";
+
+  try {
+    // 1. Fetch campaigns from Meta
+    const campaignsUrl = new URL(`${META_BASE}/${metaAccountId}/campaigns`);
+    campaignsUrl.searchParams.set("access_token", metaToken);
+    campaignsUrl.searchParams.set("fields", "id,name,status,daily_budget,objective,buying_type");
+    campaignsUrl.searchParams.set("limit", "200");
+
+    const campaignsResp = await fetch(campaignsUrl.toString());
+    const campaignsData = (await campaignsResp.json()) as any;
+
+    if (campaignsData.error) {
+      throw { status: campaignsResp.status, message: campaignsData.error.message };
+    }
+
+    const allCampaigns: any[] = campaignsData.data ?? [];
+
+    // 2. Filter ASC campaigns
+    const ascCampaigns = allCampaigns.filter((c: any) => {
+      const name = (c.name || "").toUpperCase();
+      return c.objective === "OUTCOME_SALES" || name.includes("ASC");
+    });
+
+    // 3. Fetch 7-day insights for each ASC campaign
+    const ascResults = await Promise.all(
+      ascCampaigns.map(async (campaign: any) => {
+        const insightsUrl = new URL(`${META_BASE}/${campaign.id}/insights`);
+        insightsUrl.searchParams.set("access_token", metaToken);
+        insightsUrl.searchParams.set("fields", "spend,impressions,clicks,actions,cpm,ctr,cpc");
+        insightsUrl.searchParams.set("date_preset", "last_7d");
+
+        const insResp = await fetch(insightsUrl.toString());
+        const insData = (await insResp.json()) as any;
+
+        const insights = insData.data?.[0] || {};
+        const actions: any[] = insights.actions || [];
+        const purchaseAction = actions.find(
+          (a: any) => a.action_type === "purchase" || a.action_type === "offsite_conversion.fb_pixel_purchase"
+        );
+        const conversions = purchaseAction ? parseInt(purchaseAction.value || "0") : 0;
+        const spend = parseFloat(insights.spend || "0");
+
+        return {
+          campaign_id: campaign.id,
+          campaign_name: campaign.name,
+          status: campaign.status,
+          daily_budget: campaign.daily_budget ? parseFloat(campaign.daily_budget) / 100 : null,
+          objective: campaign.objective,
+          buying_type: campaign.buying_type,
+          spend_7d: parseFloat(spend.toFixed(2)),
+          impressions_7d: parseInt(insights.impressions || "0"),
+          clicks_7d: parseInt(insights.clicks || "0"),
+          conversions_7d: conversions,
+          cpa_7d: conversions > 0 ? parseFloat((spend / conversions).toFixed(2)) : null,
+          cpm_7d: insights.cpm ? parseFloat(parseFloat(insights.cpm).toFixed(2)) : null,
+          ctr_7d: insights.ctr ? parseFloat(parseFloat(insights.ctr).toFixed(2)) : null,
+        };
+      })
+    );
+
+    // 4. Compare with ABO campaigns from database (last 7 days)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const aboCampaigns = await prisma.campaign.findMany({
+      include: {
+        metrics: {
+          where: { date: { gte: sevenDaysAgo } },
+        },
+      },
+    });
+
+    const aboTotalSpend = aboCampaigns.reduce(
+      (s, c) => s + c.metrics.reduce((ms, m) => ms + m.investment, 0), 0
+    );
+    const aboTotalSales = aboCampaigns.reduce(
+      (s, c) => s + c.metrics.reduce((ms, m) => ms + m.sales, 0), 0
+    );
+    const aboCpa = aboTotalSales > 0 ? aboTotalSpend / aboTotalSales : null;
+
+    const ascTotalSpend = ascResults.reduce((s, r) => s + r.spend_7d, 0);
+    const ascTotalConversions = ascResults.reduce((s, r) => s + r.conversions_7d, 0);
+    const ascCpa = ascTotalConversions > 0 ? ascTotalSpend / ascTotalConversions : null;
+
+    let summary = "";
+    if (ascResults.length === 0) {
+      summary = "Nenhuma campanha ASC encontrada na conta.";
+    } else if (ascCpa !== null && aboCpa !== null) {
+      const diff = ((ascCpa - aboCpa) / aboCpa) * 100;
+      if (diff < -10) {
+        summary = `ASC performando ${Math.abs(diff).toFixed(0)}% melhor que ABO em CPA. Considere escalar ASC.`;
+      } else if (diff > 10) {
+        summary = `ABO performando ${diff.toFixed(0)}% melhor que ASC em CPA. Manter foco em ABO.`;
+      } else {
+        summary = `Performance similar entre ASC e ABO (diferença de ${Math.abs(diff).toFixed(0)}%).`;
+      }
+    } else {
+      summary = `${ascResults.length} campanha(s) ASC encontrada(s). Dados insuficientes para comparação completa.`;
+    }
+
+    res.json({
+      asc_campaigns: ascResults,
+      abo_summary: {
+        total_spend_7d: parseFloat(aboTotalSpend.toFixed(2)),
+        total_sales_7d: aboTotalSales,
+        avg_cpa_7d: aboCpa !== null ? parseFloat(aboCpa.toFixed(2)) : null,
+      },
+      summary,
+    });
+  } catch (err: unknown) {
+    const error = err as { status?: number; message?: string };
+    console.error("[metrics] Error fetching ASC performance:", error.message);
+    res.json({ asc_campaigns: [], summary: "Sem dados ASC disponíveis." });
+  }
+});
+
 export default router;

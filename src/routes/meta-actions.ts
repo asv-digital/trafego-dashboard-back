@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import fs from "fs";
 import path from "path";
+import { logAction } from "./actions";
 
 const router = Router();
 
@@ -128,7 +129,17 @@ router.post("/campaigns/create", async (req: Request, res: Response) => {
       daily_budget: String(daily_budget),
     });
 
-    console.log(`[meta-actions] Campaign created: ${(data as Record<string, unknown>).id}`);
+    const campaignId = (data as Record<string, unknown>).id as string;
+    console.log(`[meta-actions] Campaign created: ${campaignId}`);
+
+    await logAction({
+      action: "create",
+      entityType: "campaign",
+      entityId: campaignId,
+      entityName: finalName,
+      details: `Campaign created with objective ${objective}, budget ${daily_budget}`,
+    });
+
     res.status(201).json(data);
   } catch (err: unknown) {
     const error = err as { status?: number; message?: string };
@@ -194,6 +205,14 @@ router.patch("/campaigns/:id/status", async (req: Request, res: Response) => {
 
     const data = await metaPost(id, { status });
 
+    await logAction({
+      action: status === "PAUSED" ? "pause" : "activate",
+      entityType: "campaign",
+      entityId: id,
+      entityName: id,
+      details: `Status changed to ${status}`,
+    });
+
     res.json(data);
   } catch (err: unknown) {
     const error = err as { status?: number; message?: string };
@@ -213,6 +232,14 @@ router.patch("/adsets/:id/status", async (req: Request, res: Response) => {
     console.log(`[meta-actions] Updating ad set ${id} status to ${status}`);
 
     const data = await metaPost(id, { status });
+
+    await logAction({
+      action: status === "PAUSED" ? "pause" : "activate",
+      entityType: "adset",
+      entityId: id,
+      entityName: id,
+      details: `Status changed to ${status}`,
+    });
 
     res.json(data);
   } catch (err: unknown) {
@@ -236,6 +263,14 @@ router.patch("/adsets/:id/budget", async (req: Request, res: Response) => {
     console.log(`[meta-actions] Updating ad set ${id} budget to ${budgetInCents} (cents)`);
 
     const data = await metaPost(id, { daily_budget: budgetInCents });
+
+    await logAction({
+      action: "budget_update",
+      entityType: "adset",
+      entityId: id,
+      entityName: id,
+      details: `Budget updated to R$${daily_budget} (${budgetInCents} cents)`,
+    });
 
     res.json(data);
   } catch (err: unknown) {

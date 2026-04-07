@@ -131,6 +131,9 @@ async function sendCapiPurchaseEvent(sale: {
       userData.ln = [sha256(sale.customerLastName)];
     }
 
+    // Melhoria 20: Deduplication — use kirvanoTxId as event_id.
+    // If the same event_id is sent from both browser pixel and CAPI,
+    // Meta will automatically deduplicate the events.
     const eventId = sale.kirvanoTxId;
 
     const body = {
@@ -172,6 +175,34 @@ async function sendCapiPurchaseEvent(sale: {
   } catch (err) {
     console.error("CAPI: failed to send event", err);
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Custom Audience — add buyer after purchase (Melhoria 16)
+// ---------------------------------------------------------------------------
+
+async function addBuyerToCustomAudience(email: string, phone?: string) {
+  const audienceId = process.env.META_BUYERS_AUDIENCE_ID;
+  if (!audienceId || !META_ACCESS_TOKEN) return;
+
+  try {
+    const schema = phone ? ["EMAIL", "PHONE"] : ["EMAIL"];
+    const data = phone
+      ? [[sha256(email), sha256(phone)]]
+      : [[sha256(email)]];
+
+    await fetch(`https://graph.facebook.com/v19.0/${audienceId}/users`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        payload: { schema, data },
+        access_token: META_ACCESS_TOKEN,
+      }),
+    });
+    console.log(`[Webhook] Comprador adicionado ao Custom Audience`);
+  } catch (err) {
+    console.error("[Webhook] Erro ao adicionar ao Custom Audience:", err);
   }
 }
 
@@ -322,6 +353,14 @@ async function handleApproved(payload: any, res: Response) {
         capiEventId: sale.kirvanoTxId,
       },
     });
+  }
+
+  // Melhoria 16: Add buyer to Custom Audience for exclusion/lookalike
+  if (sale.customerEmail) {
+    await addBuyerToCustomAudience(
+      sale.customerEmail,
+      sale.customerPhone ?? undefined,
+    );
   }
 
   // Increment daily metrics if campaign is linked
