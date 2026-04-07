@@ -210,11 +210,11 @@ router.get("/campaigns/live", async (_req: Request, res: Response) => {
         "id,name,status,daily_budget,lifetime_budget,objective,created_time",
     });
 
-    res.json(data);
+    res.json((data as any).data ?? []);
   } catch (err: unknown) {
     const error = err as { status?: number; message?: string };
     console.error("[meta-actions] Error fetching live campaigns:", error.message);
-    res.status(error.status || 500).json({ error: error.message });
+    res.json([]);
   }
 });
 
@@ -230,11 +230,11 @@ router.get("/adsets/live", async (_req: Request, res: Response) => {
         "id,name,campaign_id,status,daily_budget,targeting,optimization_goal",
     });
 
-    res.json(data);
+    res.json((data as any).data ?? []);
   } catch (err: unknown) {
     const error = err as { status?: number; message?: string };
     console.error("[meta-actions] Error fetching live ad sets:", error.message);
-    res.status(error.status || 500).json({ error: error.message });
+    res.json([]);
   }
 });
 
@@ -252,11 +252,11 @@ router.get("/insights/realtime", async (_req: Request, res: Response) => {
       level: "campaign",
     });
 
-    res.json(data);
+    res.json((data as any).data ?? []);
   } catch (err: unknown) {
     const error = err as { status?: number; message?: string };
     console.error("[meta-actions] Error fetching realtime insights:", error.message);
-    res.status(error.status || 500).json({ error: error.message });
+    res.json([]);
   }
 });
 
@@ -279,11 +279,11 @@ router.get("/insights/range", async (req: Request, res: Response) => {
       time_increment: "1",
     });
 
-    res.json(data);
+    res.json((data as any).data ?? []);
   } catch (err: unknown) {
     const error = err as { status?: number; message?: string };
     console.error("[meta-actions] Error fetching insights range:", error.message);
-    res.status(error.status || 500).json({ error: error.message });
+    res.json([]);
   }
 });
 
