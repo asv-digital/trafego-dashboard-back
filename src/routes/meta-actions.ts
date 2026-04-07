@@ -1,10 +1,28 @@
 import { Router, Request, Response } from "express";
-import config from "../../agent-config.json";
+import fs from "fs";
+import path from "path";
 
 const router = Router();
 
 const META_BASE = "https://graph.facebook.com/v19.0";
-const { access_token, ad_account_id } = config.meta;
+
+function getMetaConfig() {
+  if (process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID) {
+    return {
+      access_token: process.env.META_ACCESS_TOKEN,
+      ad_account_id: process.env.META_AD_ACCOUNT_ID,
+    };
+  }
+  try {
+    const configPath = path.resolve(__dirname, "../../agent-config.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    return config.meta;
+  } catch {
+    return { access_token: "", ad_account_id: "" };
+  }
+}
+
+const { access_token, ad_account_id } = getMetaConfig();
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -9,10 +9,61 @@ import type { AgentConfig, MetaInsight, ConsolidatedMetric } from "./types";
 import { MetaClient, getActionValue } from "./meta-client";
 import { KirvanoClient } from "./kirvano-client";
 
-// ── Load config ──────────────────────────────────────────────
+// ── Load config (env vars first, fallback to file) ───────────
 
-const configPath = path.resolve(__dirname, "../../agent-config.json");
-const config: AgentConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+function loadConfig(): AgentConfig {
+  // Try environment variables first (production)
+  if (process.env.META_ACCESS_TOKEN && process.env.META_AD_ACCOUNT_ID) {
+    return {
+      meta: {
+        access_token: process.env.META_ACCESS_TOKEN,
+        ad_account_id: process.env.META_AD_ACCOUNT_ID,
+        app_id: process.env.META_APP_ID || "",
+        app_secret: process.env.META_APP_SECRET || "",
+      },
+      kirvano: {
+        api_key: process.env.KIRVANO_API_KEY || "",
+        product_id: process.env.KIRVANO_PRODUCT_ID || "",
+      },
+      business: {
+        product_name: "56 Skills de Claude Code",
+        product_price: 97,
+        gateway_fee_percent: 3.5,
+        net_revenue_per_sale: 93.6,
+        daily_budget_target: Number(process.env.DAILY_BUDGET_TARGET) || 500,
+        cpa_target: Number(process.env.CPA_TARGET) || 50,
+        cpa_alert: Number(process.env.CPA_ALERT) || 70,
+        roas_target: Number(process.env.ROAS_TARGET) || 2.0,
+        roas_alert: Number(process.env.ROAS_ALERT) || 1.4,
+      },
+    };
+  }
+
+  // Fallback to config file (local development)
+  const configPath = path.resolve(__dirname, "../../agent-config.json");
+  try {
+    return JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  } catch {
+    // Return empty config if no file found
+    return {
+      meta: { access_token: "", ad_account_id: "", app_id: "", app_secret: "" },
+      kirvano: { api_key: "", product_id: "" },
+      business: {
+        product_name: "56 Skills de Claude Code",
+        product_price: 97,
+        gateway_fee_percent: 3.5,
+        net_revenue_per_sale: 93.6,
+        daily_budget_target: 500,
+        cpa_target: 50,
+        cpa_alert: 70,
+        roas_target: 2.0,
+        roas_alert: 1.4,
+      },
+    };
+  }
+}
+
+const config: AgentConfig = loadConfig();
 
 // ── Prisma setup ─────────────────────────────────────────────
 
