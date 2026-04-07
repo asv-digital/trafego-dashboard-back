@@ -182,27 +182,41 @@ async function syncToDatabase(metrics: ConsolidatedMetric[]): Promise<void> {
   }
 }
 
-// ── Main ─────────────────────────────────────────────────────
+// ── Collection summary type ─────────────────────────────────
 
-async function run() {
+export interface CollectionSummary {
+  totalInvestment: number;
+  totalSales: number;
+  totalRevenue: number;
+  cpa: number;
+  roas: number;
+  metricsCount: number;
+  alerts: string[];
+}
+
+// ── Exported collection function (used by scheduler + API) ──
+
+export async function runCollection(): Promise<CollectionSummary> {
   console.log("═══════════════════════════════════════════════════");
   console.log("  Bravy School — Agente Coletor de Tráfego");
   console.log("═══════════════════════════════════════════════════\n");
 
   if (!isConfigured()) {
-    console.log("⚠  Agente não configurado.");
-    console.log("   Edite o arquivo agent-config.json com suas credenciais:");
-    console.log("   - Meta Ads: access_token + ad_account_id");
-    console.log("   - Kirvano: api_key + product_id\n");
-    console.log("   Após configurar, rode: npm run agent\n");
-    await prisma.$disconnect();
-    await pool.end();
-    return;
+    console.log("Agente nao configurado. Edite agent-config.json.");
+    return {
+      totalInvestment: 0,
+      totalSales: 0,
+      totalRevenue: 0,
+      cpa: 0,
+      roas: 0,
+      metricsCount: 0,
+      alerts: ["Agente nao configurado. Edite agent-config.json com suas credenciais."],
+    };
   }
 
   const dateFrom = daysAgo(7);
   const dateTo = today();
-  console.log(`Período: ${dateFrom} → ${dateTo}\n`);
+  console.log(`Periodo: ${dateFrom} -> ${dateTo}\n`);
 
   // 1. Fetch Meta Ads data
   console.log("[1/4] Buscando dados do Meta Ads...");
@@ -224,16 +238,16 @@ async function run() {
       const transactions = await kirvano.getTransactions(dateFrom, dateTo);
       salesByDate = KirvanoClient.groupByDate(transactions);
       totalSales = [...salesByDate.values()].reduce((a, b) => a + b, 0);
-      console.log(`      ${transactions.length} transações | ${totalSales} vendas aprovadas.\n`);
+      console.log(`      ${transactions.length} transacoes | ${totalSales} vendas aprovadas.\n`);
     } catch (err) {
-      console.log(`      ⚠ Kirvano API indisponível. Vendas virão via webhook.\n`);
+      console.log(`      Kirvano API indisponivel. Vendas virao via webhook.\n`);
     }
   } else {
-    console.log("[2/4] Kirvano não configurada (vendas chegam via webhook).\n");
+    console.log("[2/4] Kirvano nao configurada (vendas chegam via webhook).\n");
   }
 
   // 3. Consolidate
-  console.log("[3/4] Consolidando métricas...");
+  console.log("[3/4] Consolidando metricas...");
   const consolidated = consolidateInsights(insights, salesByDate, config.business);
   console.log(`      ${consolidated.length} registros consolidados.\n`);
 
@@ -247,33 +261,61 @@ async function run() {
   const overallCpa = totalSales > 0 ? totalInvestment / totalSales : 0;
   const overallRoas = totalInvestment > 0 ? totalRevenue / totalInvestment : 0;
 
-  console.log("\n═══════════════════════════════════════════════════");
-  console.log("  RESUMO DO PERÍODO");
-  console.log("═══════════════════════════════════════════════════");
+  console.log("\n===================================================");
+  console.log("  RESUMO DO PERIODO");
+  console.log("===================================================");
   console.log(`  Investimento: R$ ${totalInvestment.toFixed(2)}`);
   console.log(`  Vendas:       ${totalSales}`);
   console.log(`  Receita:      R$ ${totalRevenue.toFixed(2)}`);
   console.log(`  CPA:          R$ ${overallCpa.toFixed(2)}`);
   console.log(`  ROAS:         ${overallRoas.toFixed(2)}x`);
-  console.log("═══════════════════════════════════════════════════\n");
+  console.log("===================================================\n");
 
   // Diagnostics
+  const alerts: string[] = [];
   if (overallCpa > config.business.cpa_alert) {
-    console.log("🔴 ALERTA: CPA acima do limite! Revise criativos e públicos.");
+    alerts.push("CPA acima do limite! Revise criativos e publicos.");
+    console.log("ALERTA: CPA acima do limite! Revise criativos e publicos.");
   } else if (overallCpa > config.business.cpa_target) {
-    console.log("🟡 ATENÇÃO: CPA na zona de alerta. Monitore de perto.");
+    alerts.push("CPA na zona de alerta. Monitore de perto.");
+    console.log("ATENCAO: CPA na zona de alerta. Monitore de perto.");
   } else if (totalSales > 0) {
-    console.log("🟢 CPA saudável. Considere escalar 20-30%.");
+    console.log("CPA saudavel. Considere escalar 20-30%.");
   }
 
-  await prisma.$disconnect();
-  await pool.end();
   console.log("\nAgente finalizado com sucesso.");
+
+  return {
+    totalInvestment,
+    totalSales,
+    totalRevenue,
+    cpa: overallCpa,
+    roas: overallRoas,
+    metricsCount: consolidated.length,
+    alerts,
+  };
 }
 
-run().catch(async (err) => {
-  console.error("Erro no agente:", err);
-  await prisma.$disconnect();
-  await pool.end();
-  process.exit(1);
-});
+// ── Standalone run (npm run agent) ──────────────────────────
+
+async function run() {
+  try {
+    await runCollection();
+  } finally {
+    await prisma.$disconnect();
+    await pool.end();
+  }
+}
+
+// Only run standalone when this file is executed directly (not imported)
+const isDirectRun =
+  require.main === module || process.argv[1]?.endsWith("collector.ts") || process.argv[1]?.endsWith("collector.js");
+
+if (isDirectRun) {
+  run().catch(async (err) => {
+    console.error("Erro no agente:", err);
+    await prisma.$disconnect();
+    await pool.end();
+    process.exit(1);
+  });
+}
