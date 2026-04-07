@@ -17,6 +17,7 @@ import profitRoutes from "./routes/profit";
 import goalsRoutes from "./routes/goals";
 import notificationsRoutes from "./routes/notifications";
 import testsRoutes from "./routes/tests";
+import campaignBuilderRoutes from "./routes/campaign-builder";
 import { startScheduler } from "./agent/scheduler";
 
 const app = express();
@@ -42,6 +43,7 @@ app.use("/api/profit", profitRoutes);
 app.use("/api/goals", goalsRoutes);
 app.use("/api/notifications", notificationsRoutes);
 app.use("/api/tests", testsRoutes);
+app.use("/api/campaign-builder", campaignBuilderRoutes);
 
 // Health check (Melhoria 19)
 app.get("/api/health", async (_req, res) => {
