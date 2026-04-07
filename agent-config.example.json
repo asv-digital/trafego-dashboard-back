@@ -1,0 +1,23 @@
+{
+  "meta": {
+    "access_token": "COLE_SEU_TOKEN_AQUI",
+    "ad_account_id": "act_XXXXXXXXXX",
+    "app_id": "XXXXXXXXXX",
+    "app_secret": "XXXXXXXXXX"
+  },
+  "kirvano": {
+    "api_key": "COLE_SUA_API_KEY_AQUI",
+    "product_id": "ID_DO_PRODUTO"
+  },
+  "business": {
+    "product_name": "56 Skills de Claude Code",
+    "product_price": 97.00,
+    "gateway_fee_percent": 3.5,
+    "net_revenue_per_sale": 93.60,
+    "daily_budget_target": 500,
+    "cpa_target": 50,
+    "cpa_alert": 70,
+    "roas_target": 2.0,
+    "roas_alert": 1.4
+  }
+}

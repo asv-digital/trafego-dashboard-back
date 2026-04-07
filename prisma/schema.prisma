@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Campaign {
+  id          String   @id @default(cuid())
+  name        String
+  type        String
+  audience    String?
+  dailyBudget Float
+  startDate   DateTime
+  status      String   @default("Ativa")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  metrics   MetricEntry[]
+  creatives Creative[]
+}
+
+model MetricEntry {
+  id           String   @id @default(cuid())
+  date         DateTime
+  campaignId   String
+  campaign     Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  adSet        String?
+  investment   Float
+  impressions  Int
+  clicks       Int
+  sales        Int
+  frequency    Float?
+  hookRate     Float?
+  observations String?
+  createdAt    DateTime @default(now())
+}
+
+model Creative {
+  id          String   @id @default(cuid())
+  name        String
+  type        String
+  status      String   @default("Ativo")
+  ctr         Float?
+  hookRate    Float?
+  cpa         Float?
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

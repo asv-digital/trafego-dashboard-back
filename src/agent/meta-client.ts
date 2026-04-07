@@ -1,0 +1,114 @@
+import type { AgentConfig, MetaInsight, MetaPaginatedResponse } from "./types";
+
+const API_VERSION = "v19.0";
+const BASE_URL = `https://graph.facebook.com/${API_VERSION}`;
+
+const INSIGHT_FIELDS = [
+  "campaign_name",
+  "campaign_id",
+  "adset_name",
+  "adset_id",
+  "ad_name",
+  "ad_id",
+  "spend",
+  "impressions",
+  "clicks",
+  "actions",
+  "action_values",
+  "cost_per_action_type",
+  "cpm",
+  "cpc",
+  "ctr",
+  "frequency",
+  "video_p25_watched_actions",
+  "video_p50_watched_actions",
+  "video_p75_watched_actions",
+  "video_p100_watched_actions",
+].join(",");
+
+export class MetaClient {
+  private token: string;
+  private accountId: string;
+
+  constructor(config: AgentConfig["meta"]) {
+    this.token = config.access_token;
+    this.accountId = config.ad_account_id;
+  }
+
+  /** Fetch insights for a date range, broken down by campaign + adset + ad */
+  async getInsights(dateFrom: string, dateTo: string): Promise<MetaInsight[]> {
+    const allInsights: MetaInsight[] = [];
+    let url = this.buildInsightsUrl(dateFrom, dateTo);
+
+    while (url) {
+      const res = await fetch(url);
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Meta API error ${res.status}: ${err}`);
+      }
+
+      const json = (await res.json()) as MetaPaginatedResponse;
+      allInsights.push(...json.data);
+
+      url = json.paging?.next ?? "";
+    }
+
+    return allInsights;
+  }
+
+  /** Fetch active campaign IDs */
+  async getActiveCampaigns(): Promise<Array<{ id: string; name: string; status: string }>> {
+    const url =
+      `${BASE_URL}/${this.accountId}/campaigns` +
+      `?fields=id,name,effective_status` +
+      `&filtering=[{"field":"effective_status","operator":"IN","value":["ACTIVE","PAUSED"]}]` +
+      `&limit=100` +
+      `&access_token=${this.token}`;
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Meta API error: ${err}`);
+    }
+
+    const json = (await res.json()) as { data: Array<{ id: string; name: string; effective_status: string }> };
+    return json.data.map((c) => ({
+      id: c.id,
+      name: c.name,
+      status: c.effective_status,
+    }));
+  }
+
+  private buildInsightsUrl(dateFrom: string, dateTo: string): string {
+    const params = new URLSearchParams({
+      fields: INSIGHT_FIELDS,
+      time_range: JSON.stringify({ since: dateFrom, until: dateTo }),
+      level: "ad",
+      time_increment: "1",
+      limit: "500",
+      access_token: this.token,
+    });
+
+    return `${BASE_URL}/${this.accountId}/insights?${params.toString()}`;
+  }
+}
+
+// ── Helpers to extract values from Meta's action arrays ──
+
+export function getActionValue(
+  actions: MetaInsight["actions"],
+  actionType: string
+): number {
+  if (!actions) return 0;
+  const found = actions.find((a) => a.action_type === actionType);
+  return found ? parseFloat(found.value) : 0;
+}
+
+export function getCostPerAction(
+  costs: MetaInsight["cost_per_action_type"],
+  actionType: string
+): number | null {
+  if (!costs) return null;
+  const found = costs.find((a) => a.action_type === actionType);
+  return found ? parseFloat(found.value) : null;
+}
