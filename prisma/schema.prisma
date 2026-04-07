@@ -117,3 +117,24 @@ model CartAbandonment {
   recovered     Boolean  @default(false)
   createdAt     DateTime @default(now())
 }
+
+// Melhoria 8: Backup diário
+model DailySnapshot {
+  id                String   @id @default(uuid())
+  date              DateTime @unique
+  totalSpend        Float
+  totalSales        Int
+  totalRevenue      Float
+  avgCpa            Float
+  avgRoas           Float
+  avgCtr            Float
+  avgCpm            Float
+  avgFrequency      Float
+  hookRate          Float?
+  cplpv             Float?
+  outboundCtr       Float?
+  campaignBreakdown Json?
+  collectedAt       DateTime @default(now())
+  source            String   @default("agent")
+  createdAt         DateTime @default(now())
+}

@@ -275,4 +275,99 @@ router.get("/discrepancy", async (req: Request, res: Response) => {
   });
 });
 
+// GET /ltv — LTV metrics (Melhoria 21)
+// NOTE: Must be defined before /:id routes to avoid "ltv" matching as :id
+router.get("/ltv", async (_req: Request, res: Response) => {
+  const mentoriaTicket = Number(process.env.MENTORIA_TICKET_VALUE) || 3000;
+
+  const [approvedSales, convertedCount, metricEntries] = await Promise.all([
+    prisma.sale.findMany({ where: { status: "approved" } }),
+    prisma.sale.count({ where: { convertedToMentoria: true } }),
+    prisma.metricEntry.findMany(),
+  ]);
+
+  const totalSkillsBuyers = approvedSales.length;
+  const conversionRate = totalSkillsBuyers > 0
+    ? (convertedCount / totalSkillsBuyers) * 100
+    : 0;
+
+  const totalAdSpend = metricEntries.reduce((s, m) => s + m.investment, 0);
+  const totalSkillsRevenue = totalSkillsBuyers * NET_PER_SALE;
+  const skillsRoas = totalAdSpend > 0 ? totalSkillsRevenue / totalAdSpend : 0;
+
+  const estimatedLtvPerBuyer = PRODUCT_PRICE + (conversionRate / 100) * mentoriaTicket;
+
+  const realCpaConsideringLtv = convertedCount > 0 && totalAdSpend > 0
+    ? totalAdSpend / (totalSkillsBuyers + convertedCount)
+    : null;
+
+  const insights: string[] = [];
+
+  if (totalSkillsBuyers === 0) {
+    insights.push("Nenhuma venda aprovada registrada ainda.");
+  } else {
+    insights.push(
+      `De ${totalSkillsBuyers} compradores de Skills, ${convertedCount} converteram para mentoria (${conversionRate.toFixed(1)}%).`
+    );
+  }
+
+  if (conversionRate > 5) {
+    insights.push(
+      `Taxa de conversão para mentoria acima de 5%. LTV estimado por comprador: R$${estimatedLtvPerBuyer.toFixed(2)}.`
+    );
+  } else if (totalSkillsBuyers > 0 && conversionRate <= 5) {
+    insights.push(
+      `Taxa de conversão para mentoria baixa (${conversionRate.toFixed(1)}%). Oportunidade de aumentar LTV com funil de upsell.`
+    );
+  }
+
+  if (skillsRoas > 0 && skillsRoas < 1) {
+    insights.push(
+      `ROAS de Skills isolado está negativo (${skillsRoas.toFixed(2)}x). Conversões de mentoria podem compensar.`
+    );
+  }
+
+  if (convertedCount > 0) {
+    const totalLtvRevenue = totalSkillsRevenue + convertedCount * mentoriaTicket;
+    const ltvRoas = totalAdSpend > 0 ? totalLtvRevenue / totalAdSpend : 0;
+    insights.push(
+      `ROAS considerando LTV completo: ${ltvRoas.toFixed(2)}x (vs ${skillsRoas.toFixed(2)}x apenas Skills).`
+    );
+  }
+
+  res.json({
+    total_skills_buyers: totalSkillsBuyers,
+    converted_to_mentoria: convertedCount,
+    conversion_rate: parseFloat(conversionRate.toFixed(2)),
+    mentoria_ticket: mentoriaTicket,
+    total_ad_spend: parseFloat(totalAdSpend.toFixed(2)),
+    total_skills_revenue: parseFloat(totalSkillsRevenue.toFixed(2)),
+    skills_roas: parseFloat(skillsRoas.toFixed(2)),
+    estimated_ltv_per_buyer: parseFloat(estimatedLtvPerBuyer.toFixed(2)),
+    real_cpa_considering_ltv: realCpaConsideringLtv
+      ? parseFloat(realCpaConsideringLtv.toFixed(2))
+      : null,
+    insights,
+  });
+});
+
+// PUT /:id/convert-mentoria — Mark sale as converted to mentoria (Melhoria 21)
+router.put("/:id/convert-mentoria", async (req: Request, res: Response) => {
+  const id = req.params.id as string;
+
+  try {
+    const sale = await prisma.sale.update({
+      where: { id },
+      data: {
+        convertedToMentoria: true,
+        mentoriaConvertedAt: new Date(),
+      },
+    });
+    res.json(sale);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(404).json({ error: "Sale not found", details: message });
+  }
+});
+
 export default router;

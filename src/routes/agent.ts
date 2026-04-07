@@ -48,4 +48,92 @@ router.get("/config", (_req: Request, res: Response) => {
   });
 });
 
+// GET /api/agent/token-status — Meta token expiration status (Melhoria 6)
+router.get("/token-status", (_req: Request, res: Response) => {
+  const createdAtStr = process.env.META_TOKEN_CREATED_AT;
+  if (!createdAtStr) {
+    res.status(400).json({ error: "META_TOKEN_CREATED_AT not configured" });
+    return;
+  }
+
+  const createdAt = new Date(createdAtStr);
+  const expiresAt = new Date(createdAt);
+  expiresAt.setDate(expiresAt.getDate() + 60);
+
+  const now = new Date();
+  const daysRemaining = Math.floor(
+    (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+  );
+
+  let status: "ok" | "warning" | "critical" | "expired";
+  let message: string;
+
+  if (daysRemaining < 0) {
+    status = "expired";
+    message = `Token expirou há ${Math.abs(daysRemaining)} dias. Renove imediatamente.`;
+  } else if (daysRemaining < 7) {
+    status = "critical";
+    message = `Token expira em ${daysRemaining} dias. Renovação urgente necessária.`;
+  } else if (daysRemaining <= 14) {
+    status = "warning";
+    message = `Token expira em ${daysRemaining} dias. Planeje a renovação.`;
+  } else {
+    status = "ok";
+    message = `Token válido por mais ${daysRemaining} dias.`;
+  }
+
+  res.json({
+    token_created_at: createdAt.toISOString(),
+    expires_at: expiresAt.toISOString(),
+    days_remaining: daysRemaining,
+    status,
+    message,
+  });
+});
+
+// POST /api/agent/refresh-token — Exchange token via Meta API (Melhoria 6)
+router.post("/refresh-token", async (_req: Request, res: Response) => {
+  const appId = process.env.META_APP_ID;
+  const appSecret = process.env.META_APP_SECRET;
+  const currentToken = process.env.META_ACCESS_TOKEN;
+
+  if (!appId || !appSecret || !currentToken) {
+    res.status(400).json({
+      error: "META_APP_ID, META_APP_SECRET, and META_ACCESS_TOKEN must be configured",
+    });
+    return;
+  }
+
+  try {
+    const url =
+      `https://graph.facebook.com/v19.0/oauth/access_token` +
+      `?grant_type=fb_exchange_token` +
+      `&client_id=${appId}` +
+      `&client_secret=${appSecret}` +
+      `&fb_exchange_token=${currentToken}`;
+
+    const response = await fetch(url);
+    const data = (await response.json()) as Record<string, unknown>;
+
+    if (!response.ok) {
+      res.status(response.status).json({
+        error: "Meta API error",
+        details: data,
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      new_token: data.access_token,
+      token_type: data.token_type,
+      expires_in_seconds: data.expires_in,
+      note: "Token retornado para atualização manual no .env. Não é possível atualizar variáveis de ambiente em runtime.",
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: "Failed to refresh token", details: message });
+  }
+});
+
 export default router;
