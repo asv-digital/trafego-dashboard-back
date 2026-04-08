@@ -21,7 +21,6 @@ const INSIGHT_FIELDS = [
   "ctr",
   "frequency",
   "outbound_clicks",
-  "outbound_ctr",
   "video_play_actions",
   "video_thruplay_watched_actions",
   "video_p25_watched_actions",
