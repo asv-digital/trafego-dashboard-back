@@ -7,7 +7,6 @@ import { PrismaClient } from "@prisma/client";
 
 import type { AgentConfig, MetaInsight, ConsolidatedMetric } from "./types";
 import { MetaClient, getActionValue, getLandingPageViews, getInitiateCheckouts, getOutboundClicks, getVideoPlays, getThreeSecondViews } from "./meta-client";
-import { KirvanoClient } from "./kirvano-client";
 
 // ── Load config (env vars first, fallback to file) ───────────
 
@@ -303,26 +302,31 @@ export async function runCollection(): Promise<CollectionSummary> {
   const insights = await meta.getInsights(dateFrom, dateTo);
   console.log(`      ${insights.length} registros de insights encontrados.\n`);
 
-  // 2. Fetch Kirvano sales (via API, if configured — otherwise sales come via webhook)
+  // 2. Fetch sales from database (populated by Kirvano webhooks)
   let salesByDate = new Map<string, number>();
   let totalSales = 0;
 
-  const kirvanoConfigured =
-    config.kirvano.api_key !== "COLE_SUA_API_KEY_AQUI" && config.kirvano.api_key !== "";
+  console.log("[2/4] Buscando vendas do banco (via webhooks Kirvano)...");
+  try {
+    const sales = await prisma.sale.findMany({
+      where: {
+        status: "approved",
+        date: {
+          gte: new Date(dateFrom),
+          lte: new Date(dateTo + "T23:59:59.999Z"),
+        },
+      },
+      select: { date: true },
+    });
 
-  if (kirvanoConfigured) {
-    console.log("[2/4] Buscando vendas da Kirvano...");
-    try {
-      const kirvano = new KirvanoClient(config.kirvano);
-      const transactions = await kirvano.getTransactions(dateFrom, dateTo);
-      salesByDate = KirvanoClient.groupByDate(transactions);
-      totalSales = [...salesByDate.values()].reduce((a, b) => a + b, 0);
-      console.log(`      ${transactions.length} transacoes | ${totalSales} vendas aprovadas.\n`);
-    } catch (err) {
-      console.log(`      Kirvano API indisponivel. Vendas virao via webhook.\n`);
+    for (const sale of sales) {
+      const dateKey = sale.date.toISOString().split("T")[0];
+      salesByDate.set(dateKey, (salesByDate.get(dateKey) ?? 0) + 1);
     }
-  } else {
-    console.log("[2/4] Kirvano nao configurada (vendas chegam via webhook).\n");
+    totalSales = sales.length;
+    console.log(`      ${totalSales} vendas aprovadas no periodo.\n`);
+  } catch (err) {
+    console.log(`      Erro ao buscar vendas do banco: ${err}\n`);
   }
 
   // 3. Consolidate
