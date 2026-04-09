@@ -717,6 +717,15 @@ router.get("/audience-overlap", async (_req: Request, res: Response) => {
             severity,
             color,
             estimated_wasted_spend: parseFloat(wastedSpend.toFixed(2)),
+            source: "heuristic",
+            impact: severity === "high"
+              ? `Competindo por ${overlapPct.toFixed(0)}% do mesmo público. CPM inflado.`
+              : severity === "medium"
+              ? `Overlap moderado. Monitorar.`
+              : `Overlap baixo. OK.`,
+            recommendation: severity === "high"
+              ? `Excluir "${a.name}" do público de "${b.name}", ou consolidar em um único ad set.`
+              : "Nenhuma ação necessária.",
           });
         }
       }

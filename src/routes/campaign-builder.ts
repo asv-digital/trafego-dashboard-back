@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import prisma from "../prisma";
 import { logAction } from "./actions";
+import { distributeCreative } from "../services/creative-distributor";
 
 const router = Router();
 
@@ -79,142 +80,81 @@ const TEMPLATES: CampaignTemplate[] = [
   {
     id: "remarketing_quente",
     name: "Remarketing — Público Quente",
-    description: "Pessoas que já interagiram com @jp.asv ou visitaram a LP. R$150/dia dividido em 3 conjuntos.",
+    description: "Engajou IG, visitantes LP, vídeo viewers. Exclui compradores 180d. R$150/dia.",
     type: "Remarketing",
-    totalBudget: 15000, // cents (R$150)
+    totalBudget: 15000,
     adsets: [
       {
         name: "Engajou IG JP 30d",
         budget: 5000,
-        audienceDescription: "Engajou Instagram @jp.asv nos últimos 30 dias",
-        targeting: {
-          geo_locations: { countries: ["BR"] },
-          age_min: 25,
-          age_max: 40,
-          publisher_platforms: ["facebook", "instagram"],
-        },
+        audienceDescription: "Engajou Instagram @jp.asv nos últimos 30 dias. Exclui compradores 180d.",
+        targeting: { geo_locations: { countries: ["BR"] }, age_min: 25, age_max: 40, publisher_platforms: ["facebook", "instagram"] },
       },
       {
         name: "Engajou IG JP + Bravy 90d",
         budget: 5000,
-        audienceDescription: "Engajou @jp.asv ou @asv.digital nos últimos 90 dias",
-        targeting: {
-          geo_locations: { countries: ["BR"] },
-          age_min: 25,
-          age_max: 40,
-          publisher_platforms: ["facebook", "instagram"],
-        },
+        audienceDescription: "Engajou @jp.asv ou @asv.digital nos últimos 90 dias. Exclui compradores 180d.",
+        targeting: { geo_locations: { countries: ["BR"] }, age_min: 25, age_max: 40, publisher_platforms: ["facebook", "instagram"] },
       },
       {
         name: "Visitantes LP + Video Viewers",
         budget: 5000,
-        audienceDescription: "Visitou bravy.com.br/skills ou assistiu 75% de um vídeo",
-        targeting: {
-          geo_locations: { countries: ["BR"] },
-          age_min: 25,
-          age_max: 40,
-          publisher_platforms: ["facebook", "instagram"],
-        },
+        audienceDescription: "Visitou bravy.com.br/skills ou assistiu 75% de um vídeo. Exclui compradores 180d.",
+        targeting: { geo_locations: { countries: ["BR"] }, age_min: 25, age_max: 40, publisher_platforms: ["facebook", "instagram"] },
       },
     ],
   },
   {
     id: "prospeccao_frio",
-    name: "Prospecção — Público Frio + LAL",
-    description: "Lookalikes e interesses frios. R$200/dia dividido em 4 conjuntos.",
+    name: "Prospecção — Frio + LAL + Broad",
+    description: "Lookalikes, interesses e Broad targeting. Exclui públicos quentes + compradores 180d. R$200/dia.",
     type: "Prospecção",
     totalBudget: 20000,
     adsets: [
       {
         name: "LAL 1% Engajados JP",
         budget: 5000,
-        audienceDescription: "Lookalike 1% dos que engajaram com @jp.asv",
-        targeting: {
-          geo_locations: { countries: ["BR"] },
-          age_min: 25,
-          age_max: 40,
-          publisher_platforms: ["facebook", "instagram"],
-        },
+        audienceDescription: "Lookalike 1% dos que engajaram com @jp.asv. Exclui públicos quentes + compradores 180d.",
+        targeting: { geo_locations: { countries: ["BR"] }, age_min: 25, age_max: 40, publisher_platforms: ["facebook", "instagram"] },
       },
       {
         name: "Empreendedores Tech",
         budget: 5000,
-        audienceDescription: "Interesses: Empreendedorismo + IA + Startups",
+        audienceDescription: "Interesses: Empreendedorismo + IA + Startups. 25-40 anos. Exclui públicos quentes + compradores 180d.",
         targeting: {
-          geo_locations: { countries: ["BR"] },
-          age_min: 25,
-          age_max: 40,
-          publisher_platforms: ["facebook", "instagram"],
-          flexible_spec: [
-            {
-              interests: [
-                { id: "6003107902433", name: "Entrepreneurship" },
-                { id: "6003966451572", name: "Artificial intelligence" },
-              ],
-            },
-          ],
+          geo_locations: { countries: ["BR"] }, age_min: 25, age_max: 40, publisher_platforms: ["facebook", "instagram"],
+          flexible_spec: [{ interests: [{ id: "6003107902433", name: "Entrepreneurship" }, { id: "6003966451572", name: "Artificial intelligence" }] }],
         },
       },
       {
         name: "Donos de Negócio",
         budget: 5000,
-        audienceDescription: "Interesses: Gestão empresarial + PME",
+        audienceDescription: "Interesses: Gestão empresarial + PME. 28-40 anos. Exclui públicos quentes + compradores 180d.",
         targeting: {
-          geo_locations: { countries: ["BR"] },
-          age_min: 28,
-          age_max: 40,
-          publisher_platforms: ["facebook", "instagram"],
-          flexible_spec: [
-            {
-              interests: [
-                { id: "6003384235398", name: "Business management" },
-                { id: "6003348604030", name: "Small and medium-sized enterprises" },
-              ],
-            },
-          ],
+          geo_locations: { countries: ["BR"] }, age_min: 28, age_max: 40, publisher_platforms: ["facebook", "instagram"],
+          flexible_spec: [{ interests: [{ id: "6003384235398", name: "Business management" }, { id: "6003348604030", name: "Small and medium-sized enterprises" }] }],
         },
       },
       {
-        name: "Broad — Algoritmo Decide",
+        name: "BROAD — Algoritmo Decide",
         budget: 5000,
-        audienceDescription: "Brasil 25-40, sem interesses. Meta otimiza com dados do Pixel.",
-        targeting: {
-          geo_locations: { countries: ["BR"] },
-          age_min: 25,
-          age_max: 40,
-          publisher_platforms: ["facebook", "instagram"],
-        },
+        audienceDescription: "Sem interesses. Brasil 25-40, ambos gêneros. Pixel + CAPI guiam o algoritmo. Exclui compradores 180d.",
+        targeting: { geo_locations: { countries: ["BR"] }, age_min: 25, age_max: 40, publisher_platforms: ["facebook", "instagram"] },
       },
     ],
   },
   {
-    id: "escala",
-    name: "Escala — Vencedores",
-    description: "Duplica conjuntos que performaram bem. R$300/dia em CBO.",
-    type: "Escala",
-    totalBudget: 30000,
+    id: "asc_shopping",
+    name: "Advantage+ Shopping Campaign (ASC)",
+    description: "Campanha totalmente automatizada do Meta. Sem ad sets manuais. 3-5 criativos, Meta otimiza sozinho. R$100/dia.",
+    type: "ASC",
+    totalBudget: 10000,
     adsets: [
       {
-        name: "Vencedor 1",
-        budget: 15000,
-        audienceDescription: "Copiar público do melhor conjunto da Fase 1",
-        targeting: {
-          geo_locations: { countries: ["BR"] },
-          age_min: 25,
-          age_max: 40,
-          publisher_platforms: ["facebook", "instagram"],
-        },
-      },
-      {
-        name: "Vencedor 2",
-        budget: 15000,
-        audienceDescription: "Copiar público do segundo melhor conjunto",
-        targeting: {
-          geo_locations: { countries: ["BR"] },
-          age_min: 25,
-          age_max: 40,
-          publisher_platforms: ["facebook", "instagram"],
-        },
+        name: "ASC — Auto Otimizado",
+        budget: 10000,
+        audienceDescription: "Meta gerencia audiência automaticamente via algoritmo. Sem segmentação manual.",
+        targeting: { geo_locations: { countries: ["BR"] } },
       },
     ],
   },
@@ -466,6 +406,25 @@ router.post("/build", async (req: Request, res: Response) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[campaign-builder] Build error:", message);
     res.status(500).json({ error: message, partial_results: results });
+  }
+});
+
+// POST /distribute — Distribute creative to all active adsets + ASC
+router.post("/distribute", async (req: Request, res: Response) => {
+  const { creative_id, creative_name } = req.body;
+
+  if (!creative_id) {
+    res.status(400).json({ error: "creative_id is required" });
+    return;
+  }
+
+  try {
+    const result = await distributeCreative(creative_id, creative_name || "Novo Criativo");
+    res.json({ success: true, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[campaign-builder] Distribute error:", message);
+    res.status(500).json({ error: message });
   }
 });
 

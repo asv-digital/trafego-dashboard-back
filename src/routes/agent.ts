@@ -136,4 +136,117 @@ router.post("/refresh-token", async (_req: Request, res: Response) => {
   }
 });
 
+// GET /api/agent/event-match-quality — EMQ score from Meta or estimated
+router.get("/event-match-quality", async (_req: Request, res: Response) => {
+  const pixelId = process.env.META_PIXEL_ID || "";
+  const token = process.env.META_ACCESS_TOKEN || "";
+
+  const thresholds = { good: 6.0, warning: 4.0 };
+
+  try {
+    if (!pixelId || !token) {
+      throw new Error("META_PIXEL_ID or META_ACCESS_TOKEN not configured");
+    }
+
+    // Try to get EMQ from Meta API
+    const url = `https://graph.facebook.com/v19.0/${pixelId}?fields=data_use_setting,event_match_quality&access_token=${token}`;
+    const response = await fetch(url);
+    const data = (await response.json()) as any;
+
+    if (data.error) {
+      throw new Error(data.error.message);
+    }
+
+    if (data.event_match_quality) {
+      const score = parseFloat(data.event_match_quality);
+      let status: "good" | "warning" | "critical";
+      if (score >= thresholds.good) {
+        status = "good";
+      } else if (score >= thresholds.warning) {
+        status = "warning";
+      } else {
+        status = "critical";
+      }
+
+      res.json({
+        score,
+        status,
+        details: status === "good"
+          ? `EMQ de ${score.toFixed(1)}/10. Excelente qualidade de match.`
+          : status === "warning"
+          ? `EMQ de ${score.toFixed(1)}/10. Melhorar envio de email e telefone via CAPI.`
+          : `EMQ de ${score.toFixed(1)}/10. Qualidade crítica. Revisar integração CAPI urgentemente.`,
+        source: "meta_api",
+        thresholds,
+      });
+      return;
+    }
+
+    // If no EMQ field returned, fall through to estimation
+    throw new Error("EMQ field not available from Meta API");
+  } catch (err) {
+    // Fallback: estimate based on recent CAPI sales from DB
+    try {
+      const { PrismaClient } = await import("@prisma/client");
+      const prisma = new PrismaClient();
+
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+      const recentSales = await prisma.sale.findMany({
+        where: { date: { gte: sevenDaysAgo } },
+      });
+
+      await prisma.$disconnect();
+
+      const total = recentSales.length;
+      if (total === 0) {
+        res.json({
+          score: 0,
+          status: "critical" as const,
+          details: "Sem vendas recentes para estimar EMQ.",
+          source: "estimated",
+          thresholds,
+        });
+        return;
+      }
+
+      const withEmail = recentSales.filter((s: any) => s.email && s.email.trim() !== "").length;
+      const withPhone = recentSales.filter((s: any) => s.phone && s.phone.trim() !== "").length;
+
+      const emailRate = withEmail / total;
+      const phoneRate = withPhone / total;
+      const estimatedScore = parseFloat(((emailRate * 5 + phoneRate * 3 + 2) * 1).toFixed(1));
+      const clampedScore = Math.min(estimatedScore, 10);
+
+      let status: "good" | "warning" | "critical";
+      if (clampedScore >= thresholds.good) {
+        status = "good";
+      } else if (clampedScore >= thresholds.warning) {
+        status = "warning";
+      } else {
+        status = "critical";
+      }
+
+      res.json({
+        score: clampedScore,
+        status,
+        details: `Estimativa baseada em ${total} vendas recentes. ${(emailRate * 100).toFixed(0)}% com email, ${(phoneRate * 100).toFixed(0)}% com telefone.`,
+        source: "estimated",
+        thresholds,
+      });
+    } catch (dbErr) {
+      const message = dbErr instanceof Error ? dbErr.message : String(dbErr);
+      console.error("[agent] EMQ estimation error:", message);
+      res.json({
+        score: 0,
+        status: "critical" as const,
+        details: `Não foi possível obter EMQ. Erro: ${message}`,
+        source: "error",
+        thresholds,
+      });
+    }
+  }
+});
+
 export default router;
