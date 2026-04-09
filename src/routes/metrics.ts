@@ -1,10 +1,8 @@
 import { Router, Request, Response } from "express";
 import prisma from "../prisma";
+import { PRODUCT_PRICE, NET_PER_SALE } from "../config/constants";
 
 const router = Router();
-
-const PRODUCT_PRICE = 97;
-const NET_PER_SALE = 93.6;
 
 // GET all metrics (with computed fields)
 router.get("/", async (req: Request, res: Response) => {
@@ -23,7 +21,7 @@ router.get("/", async (req: Request, res: Response) => {
     cpc: m.clicks > 0 ? m.investment / m.clicks : null,
     ctr: m.impressions > 0 ? (m.clicks / m.impressions) * 100 : null,
     cpa: m.sales > 0 ? m.investment / m.sales : null,
-    roas: m.investment > 0 ? (m.sales * PRODUCT_PRICE) / m.investment : null,
+    roas: m.investment > 0 ? (m.sales * NET_PER_SALE) / m.investment : null,
     revenue: m.sales * NET_PER_SALE,
   }));
 
@@ -167,7 +165,7 @@ router.get("/score", async (req: Request, res: Response) => {
   const totalImpressions = metrics.reduce((s, m) => s + m.impressions, 0);
 
   const cpa = totalSales > 0 ? totalInvestment / totalSales : 999;
-  const roas = totalInvestment > 0 ? (totalSales * PRODUCT_PRICE) / totalInvestment : 0;
+  const roas = totalInvestment > 0 ? (totalSales * NET_PER_SALE) / totalInvestment : 0;
   const ctr = totalImpressions > 0 ? (totalClicks / totalImpressions) * 100 : 0;
 
   const freqValues = metrics.filter((m) => m.frequency != null).map((m) => m.frequency!);
@@ -184,7 +182,7 @@ router.get("/score", async (req: Request, res: Response) => {
   const creativeHealthPct = creatives.length > 0 ? (healthyCreatives / creatives.length) * 100 : 0;
 
   // Score calculations
-  const cpaScore = cpa < 50 ? 100 : cpa < 70 ? 60 : cpa < 97 ? 30 : 0;
+  const cpaScore = cpa < 50 ? 100 : cpa < 70 ? 60 : cpa < PRODUCT_PRICE ? 30 : 0;
   const roasScore = roas > 2.5 ? 100 : roas > 2.0 ? 80 : roas > 1.4 ? 50 : roas > 1.0 ? 20 : 0;
   const ctrScore = ctr > 2.0 ? 100 : ctr > 1.5 ? 70 : ctr > 0.8 ? 40 : 0;
   const freqScore = avgFrequency < 2 ? 100 : avgFrequency < 3 ? 70 : avgFrequency < 5 ? 40 : 0;
@@ -805,6 +803,181 @@ router.get("/audience-overlap", async (_req: Request, res: Response) => {
     const error = err as { message?: string };
     console.error("[metrics] Error computing audience overlap:", error.message);
     res.json({ pairs: [], total_waste_estimate: 0, message: "Erro ao analisar sobreposicao de publicos." });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /ad-diagnostics — Quality/Engagement/Conversion rankings (Ponto 6)
+// ---------------------------------------------------------------------------
+router.get("/ad-diagnostics", async (req: Request, res: Response) => {
+  try {
+    const period = (req.query.period as string) || "7d";
+    const days = period === "30d" ? 30 : period === "14d" ? 14 : 7;
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+
+    const diagnostics = await prisma.adDiagnostic.findMany({
+      where: { date: { gte: since } },
+      orderBy: { date: "desc" },
+    });
+
+    // Group by ad (latest entry per ad)
+    const byAd = new Map<string, any>();
+    for (const d of diagnostics) {
+      if (!byAd.has(d.adId)) {
+        byAd.set(d.adId, { ...d, totalSpend: 0, entries: 0 });
+      }
+      const entry = byAd.get(d.adId)!;
+      entry.totalSpend += d.spend;
+      entry.entries++;
+    }
+
+    const isBelowAvg = (r: string) => r.includes("BELOW_AVERAGE");
+
+    function diagnoseAd(quality: string, engagement: string, conversion: string, cpa: number | null): { diagnosis: string; priority: string } {
+      const issues: string[] = [];
+
+      if (isBelowAvg(quality)) {
+        issues.push("QUALITY BAIXA: LP com experiencia ruim ou clickbait detectado. Revisar LP ou criativo.");
+      }
+      if (isBelowAvg(engagement)) {
+        issues.push("ENGAGEMENT BAIXO: Criativo nao gera interacao. Trocar hook, testar novo angulo ou formato.");
+      }
+      if (isBelowAvg(conversion)) {
+        issues.push("CONVERSAO BAIXA: Publico errado ou oferta fraca. Testar novo publico ou ajustar copy.");
+      }
+
+      if (issues.length === 0) {
+        if (cpa && cpa > 70) return { diagnosis: "Rankings OK mas CPA alto. Possivel saturacao de frequencia ou aumento de competicao.", priority: "medium" };
+        return { diagnosis: "Ad saudavel. Rankings acima da media.", priority: "low" };
+      }
+
+      const priority = issues.some(i => i.includes("_10")) ? "critical" : "high";
+      return { diagnosis: issues.join(" | "), priority };
+    }
+
+    const ads = Array.from(byAd.values()).map((ad) => {
+      const { diagnosis, priority } = diagnoseAd(ad.qualityRanking, ad.engagementRanking, ad.conversionRanking, ad.cpa);
+      return {
+        adId: ad.adId,
+        adName: ad.adName,
+        adsetId: ad.adsetId,
+        campaignId: ad.campaignId,
+        quality: ad.qualityRanking,
+        engagement: ad.engagementRanking,
+        conversion: ad.conversionRanking,
+        cpa: ad.cpa ? parseFloat(ad.cpa.toFixed(2)) : null,
+        spend_period: parseFloat(ad.totalSpend.toFixed(2)),
+        diagnosis,
+        priority,
+      };
+    });
+
+    // Sort by priority
+    const priorityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+    ads.sort((a, b) => (priorityOrder[a.priority] ?? 9) - (priorityOrder[b.priority] ?? 9));
+
+    const summary = {
+      total_ads: ads.length,
+      quality_issues: ads.filter(a => isBelowAvg(a.quality)).length,
+      engagement_issues: ads.filter(a => isBelowAvg(a.engagement)).length,
+      conversion_issues: ads.filter(a => isBelowAvg(a.conversion)).length,
+    };
+
+    res.json({ ads, summary, period });
+  } catch (err: unknown) {
+    const error = err as { message?: string };
+    console.error("[metrics] Error fetching ad diagnostics:", error.message);
+    res.json({ ads: [], summary: { total_ads: 0, quality_issues: 0, engagement_issues: 0, conversion_issues: 0 } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /funnel — Full funnel analysis (Ponto 5)
+// ---------------------------------------------------------------------------
+router.get("/funnel", async (req: Request, res: Response) => {
+  try {
+    const period = (req.query.period as string) || "7d";
+    const days = period === "30d" ? 30 : period === "14d" ? 14 : 7;
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+
+    const metrics = await prisma.metricEntry.aggregate({
+      where: { date: { gte: since } },
+      _sum: {
+        impressions: true,
+        clicks: true,
+        landingPageViews: true,
+        sales: true,
+      },
+    });
+
+    // Checkouts = cart abandonments + all sales (pending, approved, etc.)
+    const cartAbandons = await prisma.cartAbandonment.count({
+      where: { createdAt: { gte: since } },
+    });
+    const allSales = await prisma.sale.count({
+      where: { createdAt: { gte: since } },
+    });
+    const checkouts = cartAbandons + allSales;
+
+    const purchases = await prisma.sale.count({
+      where: { createdAt: { gte: since }, status: "approved" },
+    });
+
+    const impressions = metrics._sum.impressions || 0;
+    const clicks = metrics._sum.clicks || 0;
+    const lpViews = metrics._sum.landingPageViews || 0;
+
+    // Rates
+    const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+    const clickToLp = clicks > 0 ? (lpViews / clicks) * 100 : 0;
+    const lpToCheckout = lpViews > 0 ? (checkouts / lpViews) * 100 : 0;
+    const checkoutToPurchase = checkouts > 0 ? (purchases / checkouts) * 100 : 0;
+    const overallConversion = impressions > 0 ? (purchases / impressions) * 100 : 0;
+
+    // Diagnosis
+    const diagnosis: { area: string; status: string; message: string }[] = [];
+
+    if (impressions > 1000 && ctr < 1) {
+      diagnosis.push({ area: "creative", status: "critical", message: "CTR abaixo de 1%. Criativos nao estao gerando cliques. Trocar hook ou formato." });
+    } else if (ctr >= 1 && ctr < 1.5) {
+      diagnosis.push({ area: "creative", status: "warning", message: "CTR entre 1-1.5%. Criativos OK mas podem melhorar." });
+    }
+
+    if (clicks > 100 && clickToLp < 70) {
+      diagnosis.push({ area: "landing_page", status: "critical", message: `Click→LP em ${clickToLp.toFixed(1)}%. LP pode estar lenta ou URL quebrada. Benchmark: >70%.` });
+    }
+
+    if (lpViews > 50 && lpToCheckout < 5) {
+      diagnosis.push({ area: "landing_page", status: "warning", message: `LP→Checkout em ${lpToCheckout.toFixed(1)}%. LP nao convence. Revisar headline e oferta. Benchmark: >5%.` });
+    }
+
+    if (checkouts > 10 && checkoutToPurchase < 30) {
+      diagnosis.push({ area: "checkout", status: "warning", message: `Checkout→Compra em ${checkoutToPurchase.toFixed(1)}%. Atrito no pagamento. Benchmark: >30%.` });
+    }
+
+    if (diagnosis.length === 0 && purchases > 0) {
+      diagnosis.push({ area: "overall", status: "healthy", message: "Funil saudavel. Todas as taxas dentro dos benchmarks." });
+    }
+
+    res.json({
+      period,
+      funnel: { impressions, clicks, lp_views: lpViews, checkouts, purchases },
+      rates: {
+        ctr: parseFloat(ctr.toFixed(2)),
+        click_to_lp: parseFloat(clickToLp.toFixed(2)),
+        lp_to_checkout: parseFloat(lpToCheckout.toFixed(2)),
+        checkout_to_purchase: parseFloat(checkoutToPurchase.toFixed(2)),
+        overall_conversion: parseFloat(overallConversion.toFixed(4)),
+      },
+      benchmarks: { ctr: 1.0, click_to_lp: 70, lp_to_checkout: 5, checkout_to_purchase: 30 },
+      diagnosis,
+    });
+  } catch (err: unknown) {
+    const error = err as { message?: string };
+    console.error("[metrics] Error computing funnel:", error.message);
+    res.json({ funnel: {}, rates: {}, diagnosis: [] });
   }
 });
 

@@ -9,6 +9,7 @@ import { executeBudgetRebalance, rebalanceWithinCampaigns } from "../services/bu
 import { resolveActiveTests } from "../services/ab-test-resolver";
 import { applyDaypartingRules } from "../services/dayparting";
 import { cleanExpiredLocks } from "../services/automation-coordinator";
+import { checkCreativeStock } from "../services/creative-stock";
 import { NET_PER_SALE } from "../config/constants";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -349,6 +350,40 @@ export function startScheduler(): void {
     }
   }, ONE_HOUR_MS);
   console.log("[Scheduler] Dayparting agendado a cada 1 hora.");
+
+  // Creative stock check: daily at 9am (Ponto 7)
+  scheduleCreativeStockCheck();
+}
+
+function scheduleCreativeStockCheck(): void {
+  const now = new Date();
+  const next9am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 0, 0, 0);
+  if (now >= next9am) next9am.setDate(next9am.getDate() + 1);
+  const msUntil9am = next9am.getTime() - now.getTime();
+
+  console.log(`[Scheduler] Verificacao de criativos agendada para ${next9am.toISOString()}`);
+
+  setTimeout(async () => {
+    try {
+      const stock = await checkCreativeStock();
+      if (stock.alert_level === "critical") {
+        await sendNotification("alert_critical", {
+          type: "ESTOQUE DE CRIATIVOS CRITICO",
+          detail: `Apenas ${stock.healthy_count} criativo(s) saudavel(is). Operacao pode parar em ${stock.days_until_crisis} dias.`,
+          action: stock.recommendation,
+        });
+      } else if (stock.alert_level === "warning") {
+        await sendNotification("auto_action", {
+          action: "ALERTA CRIATIVOS",
+          adset: "Geral",
+          reason: stock.recommendation,
+        });
+      }
+    } catch (err) {
+      console.error(`[Scheduler] Erro na verificacao de criativos: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    scheduleCreativeStockCheck();
+  }, msUntil9am);
 }
 
 export async function runNow(): Promise<CollectionSummary> {

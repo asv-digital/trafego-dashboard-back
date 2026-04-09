@@ -77,6 +77,10 @@ model MetricEntry {
   threeSecondViews       Int?
   videoPlays             Int?
 
+  // Ponto 8: ThruPlay
+  thruplayViews    Int?
+  thruplayRate     Float?
+
   createdAt DateTime @default(now())
 }
 
@@ -88,6 +92,7 @@ model Creative {
   ctr         Float?
   hookRate    Float?
   cpa         Float?
+  thruplayRate Float?
   campaignId  String
   campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   createdAt   DateTime @default(now())
@@ -232,6 +237,24 @@ model NotificationLog {
   status    String   // 'sent' | 'failed'
   error     String?
   createdAt DateTime @default(now())
+}
+
+// Ponto 6: Diagnóstico de qualidade por ad
+model AdDiagnostic {
+  id                String   @id @default(uuid())
+  date              DateTime
+  adId              String
+  adName            String
+  adsetId           String
+  campaignId        String
+  qualityRanking    String   // 'ABOVE_AVERAGE_10' ... 'BELOW_AVERAGE_35'
+  engagementRanking String
+  conversionRanking String
+  spend             Float
+  cpa               Float?
+  createdAt         DateTime @default(now())
+
+  @@unique([date, adId])
 }
 
 // Ponto 1: Coordenação entre automações (Automation Lock)

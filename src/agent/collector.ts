@@ -261,6 +261,97 @@ async function syncToDatabase(metrics: ConsolidatedMetric[]): Promise<void> {
   }
 }
 
+// ── Ad Diagnostics (Ponto 6) ────────────────────────────────
+
+async function saveAdDiagnostics(insights: MetaInsight[]): Promise<void> {
+  let saved = 0;
+  for (const row of insights) {
+    if (!row.ad_id || !row.quality_ranking || row.quality_ranking === "UNKNOWN") continue;
+
+    const spend = parseFloat(row.spend) || 0;
+    const actions = row.actions || [];
+    const purchases = actions.find(
+      (a) => a.action_type === "purchase" || a.action_type === "offsite_conversion.fb_pixel_purchase"
+    );
+    const sales = purchases ? parseFloat(purchases.value) : 0;
+    const cpa = sales > 0 ? spend / sales : null;
+    const insightDate = new Date(row.date_start);
+
+    try {
+      await prisma.adDiagnostic.upsert({
+        where: { date_adId: { date: insightDate, adId: row.ad_id } },
+        create: {
+          date: insightDate,
+          adId: row.ad_id,
+          adName: row.ad_name || "",
+          adsetId: row.adset_id || "",
+          campaignId: row.campaign_id || "",
+          qualityRanking: row.quality_ranking || "UNKNOWN",
+          engagementRanking: row.engagement_rate_ranking || "UNKNOWN",
+          conversionRanking: row.conversion_rate_ranking || "UNKNOWN",
+          spend,
+          cpa,
+        },
+        update: {
+          qualityRanking: row.quality_ranking || "UNKNOWN",
+          engagementRanking: row.engagement_rate_ranking || "UNKNOWN",
+          conversionRanking: row.conversion_rate_ranking || "UNKNOWN",
+          spend,
+          cpa,
+        },
+      });
+      saved++;
+    } catch (err) {
+      // Skip duplicates or errors silently
+    }
+  }
+  if (saved > 0) console.log(`  [+] ${saved} ad diagnostics salvos.`);
+}
+
+// ── ThruPlay data (Ponto 8) ─────────────────────────────────
+
+async function saveThruplayData(insights: MetaInsight[]): Promise<void> {
+  // Group by adset + date to update MetricEntry thruplay fields
+  const grouped = new Map<string, { thruplayViews: number; impressions: number; campaignName: string; adsetName: string; date: string }>();
+
+  for (const row of insights) {
+    const key = `${row.campaign_id}|${row.adset_id}|${row.date_start}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, { thruplayViews: 0, impressions: 0, campaignName: row.campaign_name, adsetName: row.adset_name, date: row.date_start });
+    }
+    const g = grouped.get(key)!;
+    g.impressions += parseInt(row.impressions) || 0;
+
+    const thruplay = row.video_thruplay_watched_actions?.find((a) => a.action_type === "video_view");
+    if (thruplay) g.thruplayViews += parseInt(thruplay.value) || 0;
+  }
+
+  let updated = 0;
+  for (const [, data] of grouped) {
+    if (data.thruplayViews === 0) continue;
+
+    const thruplayRate = data.impressions > 0 ? (data.thruplayViews / data.impressions) * 100 : 0;
+    const insightDate = new Date(data.date);
+
+    // Find matching MetricEntry
+    const campaign = await prisma.campaign.findFirst({ where: { name: data.campaignName } });
+    if (!campaign) continue;
+
+    const metric = await prisma.metricEntry.findFirst({
+      where: { campaignId: campaign.id, date: insightDate, adSet: data.adsetName },
+    });
+
+    if (metric) {
+      await prisma.metricEntry.update({
+        where: { id: metric.id },
+        data: { thruplayViews: data.thruplayViews, thruplayRate: parseFloat(thruplayRate.toFixed(2)) },
+      });
+      updated++;
+    }
+  }
+  if (updated > 0) console.log(`  [+] ${updated} metrics atualizados com thruplay.`);
+}
+
 // ── Collection summary type ─────────────────────────────────
 
 export interface CollectionSummary {
@@ -338,6 +429,11 @@ export async function runCollection(): Promise<CollectionSummary> {
   // 4. Sync to database
   console.log("[4/4] Salvando no banco de dados...");
   await syncToDatabase(consolidated);
+
+  // 4b. Save ad diagnostics (Ponto 6) and thruplay data (Ponto 8)
+  console.log("[4b] Salvando diagnostics e thruplay...");
+  await saveAdDiagnostics(insights);
+  await saveThruplayData(insights);
 
   // Summary
   const totalInvestment = consolidated.reduce((s, m) => s + m.investment, 0);

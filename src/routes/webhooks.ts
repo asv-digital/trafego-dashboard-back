@@ -9,9 +9,7 @@ const PRODUCT_ID = process.env.KIRVANO_PRODUCT_ID || "";
 const META_PIXEL_ID = process.env.META_PIXEL_ID || "";
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || "";
 
-const PRODUCT_PRICE = 97.0;
-const KIRVANO_FEE_RATE = 0.035;
-const NET_PER_SALE = PRODUCT_PRICE * (1 - KIRVANO_FEE_RATE); // 93.605
+import { PRODUCT_PRICE, KIRVANO_FEE_RATE, NET_PER_SALE } from "../config/constants";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -100,6 +98,7 @@ function extractMetaIds(payload: any) {
 // ---------------------------------------------------------------------------
 
 async function sendCapiPurchaseEvent(sale: {
+  id: string;
   kirvanoTxId: string;
   amountGross: number;
   customerEmail?: string | null;
@@ -131,10 +130,12 @@ async function sendCapiPurchaseEvent(sale: {
       userData.ln = [sha256(sale.customerLastName)];
     }
 
-    // Melhoria 20: Deduplication — use kirvanoTxId as event_id.
-    // If the same event_id is sent from both browser pixel and CAPI,
-    // Meta will automatically deduplicate the events.
-    const eventId = sale.kirvanoTxId;
+    // Deduplication (CAPI + Pixel):
+    // Usa sale.id como event_id. O pixel do browser deve enviar o mesmo ID:
+    //   fbq('track', 'Purchase', { value: amount, currency: 'BRL' }, { eventID: saleId });
+    // Quando ambos enviam o mesmo event_id, o Meta deduplica automaticamente.
+    // Ref: https://developers.facebook.com/docs/marketing-api/conversions-api/deduplicate-pixel-and-server-events
+    const eventId = sale.id;
 
     const body = {
       data: [
@@ -204,6 +205,105 @@ async function addBuyerToCustomAudience(email: string, phone?: string) {
   } catch (err) {
     console.error("[Webhook] Erro ao adicionar ao Custom Audience:", err);
   }
+}
+
+// ---------------------------------------------------------------------------
+// CAPI — Generic event sender (Ponto 4: InitiateCheckout)
+// ---------------------------------------------------------------------------
+
+async function sendCAPIEvent(eventData: {
+  event_name: string;
+  event_time: number;
+  event_id: string;
+  event_source_url?: string;
+  user_data: Record<string, any>;
+  custom_data: Record<string, any>;
+  action_source: string;
+}): Promise<boolean> {
+  if (!META_PIXEL_ID || !META_ACCESS_TOKEN) return false;
+
+  try {
+    const res = await fetch(`https://graph.facebook.com/v19.0/${META_PIXEL_ID}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        data: [eventData],
+        access_token: META_ACCESS_TOKEN,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`CAPI: ${eventData.event_name} error:`, err);
+      return false;
+    }
+
+    console.log(`CAPI: ${eventData.event_name} enviado | event_id: ${eventData.event_id}`);
+    return true;
+  } catch (err) {
+    console.error(`CAPI: ${eventData.event_name} failed:`, err);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Custom Audience — add abandoner (Ponto 5)
+// ---------------------------------------------------------------------------
+
+async function addAbandonerToCustomAudience(email: string, phone?: string) {
+  const audienceId = process.env.META_AUDIENCE_ABANDONERS_ID;
+  if (!audienceId || !META_ACCESS_TOKEN) return;
+
+  try {
+    const schema = phone ? ["EMAIL", "PHONE"] : ["EMAIL"];
+    const data = phone
+      ? [[sha256(email), sha256(phone)]]
+      : [[sha256(email)]];
+
+    await fetch(`https://graph.facebook.com/v19.0/${audienceId}/users`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        payload: { schema, data },
+        access_token: META_ACCESS_TOKEN,
+      }),
+    });
+    console.log("[AUDIENCE] Abandonador adicionado ao Custom Audience");
+  } catch (err) {
+    console.error("[AUDIENCE] Erro ao adicionar abandonador:", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CAPI InitiateCheckout helper
+// ---------------------------------------------------------------------------
+
+async function sendInitiateCheckout(
+  eventId: string,
+  customer: ReturnType<typeof extractCustomer>,
+  payload: any
+): Promise<void> {
+  const userData: Record<string, any> = { country: sha256("br") };
+  if (customer.email) userData.em = sha256(customer.email);
+  if (customer.phone) userData.ph = sha256(customer.phone.replace(/\D/g, ""));
+  if (customer.firstName) userData.fn = sha256(customer.firstName);
+  if (payload.fbp) userData.fbp = payload.fbp;
+  if (payload.fbc) userData.fbc = payload.fbc;
+
+  await sendCAPIEvent({
+    event_name: "InitiateCheckout",
+    event_time: Math.floor(Date.now() / 1000),
+    event_id: `ic_${eventId}`,
+    event_source_url: payload.checkout_url || undefined,
+    user_data: userData,
+    custom_data: {
+      currency: "BRL",
+      value: PRODUCT_PRICE,
+      content_name: "56 Skills de Claude Code",
+      content_type: "product",
+    },
+    action_source: "website",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +436,7 @@ async function handleApproved(payload: any, res: Response) {
 
   // Send CAPI Purchase event (Melhoria 1)
   const capiSent = await sendCapiPurchaseEvent({
+    id: sale.id,
     kirvanoTxId: sale.kirvanoTxId,
     amountGross: sale.amountGross,
     customerEmail: sale.customerEmail,
@@ -350,7 +451,7 @@ async function handleApproved(payload: any, res: Response) {
       data: {
         capiSent: true,
         capiSentAt: new Date(),
-        capiEventId: sale.kirvanoTxId,
+        capiEventId: sale.id,
       },
     });
   }
@@ -447,12 +548,34 @@ async function handleCartAbandoned(payload: any, res: Response) {
     },
   });
 
+  // Ponto 4: Enviar InitiateCheckout via CAPI
+  await sendInitiateCheckout(cart.id, customer, payload);
+
+  // Ponto 5: Adicionar ao Custom Audience de abandonadores
+  if (customer.email) {
+    await addAbandonerToCustomAudience(customer.email, customer.phone);
+  }
+
   console.log(`[Webhook] Cart abandoned: id=${cart.id} email=${customer.email || "?"}`);
   res.json({ received: true, action: "cart_abandoned", cartId: cart.id });
 }
 
 async function handlePendingPayment(payload: any, status: string, res: Response) {
   const sale = await createSale(payload, status);
+  const customer = extractCustomer(payload);
+
+  // Ponto 4: Enviar InitiateCheckout via CAPI (se não veio de cart_abandoned recente)
+  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000);
+  const recentCart = customer.email
+    ? await prisma.cartAbandonment.findFirst({
+        where: { customerEmail: customer.email, createdAt: { gte: thirtyMinAgo } },
+      })
+    : null;
+
+  if (!recentCart) {
+    await sendInitiateCheckout(sale.id, customer, payload);
+  }
+
   console.log(`[Webhook] Pending payment created: txId=${sale.kirvanoTxId} status=${status}`);
   res.json({ received: true, action: `sale_${status}`, saleId: sale.id });
 }

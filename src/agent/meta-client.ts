@@ -27,6 +27,10 @@ const INSIGHT_FIELDS = [
   "video_p50_watched_actions",
   "video_p75_watched_actions",
   "video_p100_watched_actions",
+  // Ponto 6: Rankings de qualidade
+  "quality_ranking",
+  "engagement_rate_ranking",
+  "conversion_rate_ranking",
 ].join(",");
 
 export class MetaClient {

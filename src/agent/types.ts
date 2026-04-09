@@ -47,6 +47,10 @@ export interface MetaInsight {
   video_p50_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p75_watched_actions?: Array<{ action_type: string; value: string }>;
   video_p100_watched_actions?: Array<{ action_type: string; value: string }>;
+  // Ponto 6: Rankings de qualidade
+  quality_ranking?: string;
+  engagement_rate_ranking?: string;
+  conversion_rate_ranking?: string;
   date_start: string;
   date_stop: string;
 }
