@@ -3,6 +3,7 @@ import { sendNotification } from "./whatsapp-notifier";
 import { logAction } from "../routes/actions";
 import { NET_PER_SALE } from "../config/constants";
 import { canAutomate, acquireLock } from "./automation-coordinator";
+import { canIncreaseBudget, getCurrentAllocation } from "./budget-guard";
 
 const META_BASE = "https://graph.facebook.com/v19.0";
 
@@ -64,6 +65,14 @@ async function getAutomationConfig() {
     autoRotateCreatives: false,
     notifyOnAutoAction: true,
     cpaPauseThreshold: 70,
+    autoPauseFrequency: true,
+    frequencyLimitProspection: 3.0,
+    frequencyLimitRemarketing: 6.0,
+    budgetCapProspection: 250,
+    budgetCapRemarketing: 200,
+    budgetCapASC: 150,
+    budgetFloorProspection: 100,
+    budgetFloorRemarketing: 100,
   };
 }
 
@@ -433,6 +442,56 @@ export async function executeAutomations(): Promise<void> {
 
     // REGRA 1: AUTO-PAUSE — Gasto > limite sem NENHUMA venda (ação imediata)
     if (config.autoPauseNoSales && adset.totalSpend > config.autoPauseSpendLimit && adset.sales === 0) {
+      // Ponto 3: Verificar boletos/pix pendentes antes de pausar
+      const threeDaysAgo = new Date();
+      threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+      const pendingSales = await prisma.sale.count({
+        where: {
+          status: { startsWith: "pending" },
+          createdAt: { gte: threeDaysAgo },
+          OR: [
+            { metaAdsetId: adset.id },
+            { metaCampaignId: adset.campaignId },
+          ],
+        },
+      });
+
+      if (pendingSales > 0) {
+        // Tem boletos pendentes — verificar se já esperou 48h
+        const oldestPending = await prisma.sale.findFirst({
+          where: {
+            status: { startsWith: "pending" },
+            OR: [{ metaAdsetId: adset.id }, { metaCampaignId: adset.campaignId }],
+          },
+          orderBy: { createdAt: "asc" },
+        });
+
+        const hoursWaiting = oldestPending
+          ? (Date.now() - oldestPending.createdAt.getTime()) / (1000 * 60 * 60)
+          : 0;
+
+        if (hoursWaiting < 48) {
+          await logAction({
+            action: "pause_delayed_pending_sales",
+            entityType: "adset",
+            entityId: adset.id,
+            entityName: adset.name,
+            details: `Gasto R$${adset.totalSpend.toFixed(0)} sem vendas aprovadas, mas ${pendingSales} boleto(s) pendente(s). Aguardando 48h.`,
+            source: "automation",
+          });
+          if (config.notifyOnAutoAction) {
+            await sendNotification("auto_action", {
+              action: "AGUARDANDO BOLETOS",
+              adset: adset.name,
+              reason: `R$${adset.totalSpend.toFixed(0)} sem vendas, mas ${pendingSales} boleto(s) pendente(s). Aguardando conversao (max 48h).`,
+            });
+          }
+          console.log(`[AUTO] AGUARDANDO ${adset.name} — ${pendingSales} boleto(s) pendente(s)`);
+          continue;
+        }
+        // Se já passou 48h, cai no fluxo de pausa normal abaixo
+      }
+
       const lockCheck = await canAutomate('adset', adset.id, 'auto_executor');
       if (!lockCheck.allowed) {
         console.log(`[AUTO] Pulando ${adset.name} — ${lockCheck.reason}`);
@@ -447,7 +506,7 @@ export async function executeAutomations(): Promise<void> {
           entityType: "adset",
           entityId: adset.id,
           entityName: adset.name,
-          details: `Auto-pause: R$${adset.totalSpend.toFixed(0)} gastos, 0 vendas. Limite: R$${config.autoPauseSpendLimit}.`,
+          details: `Auto-pause: R$${adset.totalSpend.toFixed(0)} gastos, 0 vendas${pendingSales > 0 ? ` (${pendingSales} boletos vencidos)` : ""}. Limite: R$${config.autoPauseSpendLimit}.`,
           source: "automation",
         });
         if (config.notifyOnAutoAction) {
@@ -543,30 +602,147 @@ export async function executeAutomations(): Promise<void> {
           continue;
         }
 
-        const newBudget = Math.min(
+        const desiredNewBudget = Math.min(
           Math.round(adset.dailyBudget * (1 + config.autoScalePercent / 100)),
           config.autoScaleMaxBudget
         );
+        const desiredIncrement = desiredNewBudget - adset.dailyBudget;
+
+        // Ponto 4: Verificar budget total + teto por tipo
+        const budgetCheck = await canIncreaseBudget(adset.campaignName, desiredIncrement);
+        if (!budgetCheck.allowed) {
+          await logAction({
+            action: "scale_blocked_budget",
+            entityType: "adset",
+            entityId: adset.id,
+            entityName: adset.name,
+            details: `Escala bloqueada: ${budgetCheck.reason}`,
+            source: "automation",
+          });
+          console.log(`[AUTO] SCALE BLOQUEADO ${adset.name} — ${budgetCheck.reason}`);
+          continue;
+        }
+
+        const newBudget = budgetCheck.maxIncrease < desiredIncrement
+          ? adset.dailyBudget + budgetCheck.maxIncrease
+          : desiredNewBudget;
+        const isPartial = budgetCheck.maxIncrease < desiredIncrement;
 
         const success = await updateAdsetBudget(adset.id, newBudget);
         if (success) {
           await acquireLock('adset', adset.id, 'auto_executor', 'scale', adset.dailyBudget, newBudget);
           await logAction({
-            action: "auto_scale",
+            action: isPartial ? "auto_scale_partial" : "auto_scale",
             entityType: "adset",
             entityId: adset.id,
             entityName: adset.name,
-            details: `Auto-scale: CPA <R$${config.autoScaleCPAThreshold} por ${config.autoScaleMinDays} dias. Budget R$${adset.dailyBudget} → R$${newBudget}. Teto: R$${config.autoScaleMaxBudget}.`,
+            details: `Auto-scale${isPartial ? " PARCIAL" : ""}: CPA <R$${config.autoScaleCPAThreshold} por ${config.autoScaleMinDays} dias. Budget R$${adset.dailyBudget} → R$${newBudget}.${isPartial ? ` ${budgetCheck.reason}` : ""}`,
             source: "automation",
           });
           if (config.notifyOnAutoAction) {
             await sendNotification("auto_action", {
-              action: "ESCALADO",
+              action: isPartial ? "ESCALA PARCIAL" : "ESCALADO",
               adset: adset.name,
-              reason: `CPA <R$${config.autoScaleCPAThreshold} por ${config.autoScaleMinDays}d. Budget ${adset.dailyBudget} → ${newBudget}`,
+              reason: `CPA <R$${config.autoScaleCPAThreshold} por ${config.autoScaleMinDays}d. Budget ${adset.dailyBudget} → ${newBudget}${isPartial ? " (limitado pelo budget total)" : ""}`,
             });
           }
-          console.log(`[AUTO] ESCALADO ${adset.name} — Budget R$${adset.dailyBudget} → R$${newBudget}`);
+          console.log(`[AUTO] ${isPartial ? "ESCALA PARCIAL" : "ESCALADO"} ${adset.name} — Budget R$${adset.dailyBudget} → R$${newBudget}`);
+        }
+      }
+    }
+
+    // REGRA 4: AUTO-PAUSE FREQUÊNCIA — Audiência saturada (só prospecção)
+    if (config.autoPauseFrequency !== false) {
+      const isRemarketing = adset.campaignName?.toUpperCase().includes("RMK") ||
+                            adset.campaignName?.toUpperCase().includes("REMARKETING");
+      const freqLimit = isRemarketing
+        ? (config.frequencyLimitRemarketing ?? 6.0)
+        : (config.frequencyLimitProspection ?? 3.0);
+
+      // Pega frequência dos últimos 3 dias
+      const recentMetrics = adset.metrics.slice(-3);
+      if (recentMetrics.length >= 2) {
+        const frequencies = recentMetrics.filter((m) => m.date && adset.metrics.indexOf(m) >= adset.metrics.length - 3);
+        const avgFrequency = frequencies.length > 0
+          ? frequencies.reduce((sum, m) => {
+              // Frequência vem do Meta, estimamos pelo total
+              const freq = adset.totalSpend > 0 && adset.metrics.length > 0
+                ? adset.metrics[adset.metrics.length - 1]?.spend / (adset.dailyBudget || 1)
+                : 0;
+              return sum + freq;
+            }, 0) / frequencies.length
+          : 0;
+
+        // Usar a frequência diretamente dos dados do Meta que já temos
+        // O campo frequency já é coletado pelo getActiveAdsetMetrics
+        const metaFrequency = recentMetrics.length > 0
+          ? recentMetrics.reduce((max, m) => Math.max(max, 0), 0)
+          : 0;
+
+        // Busca frequência real via Meta API para este adset
+        const metaToken = process.env.META_ACCESS_TOKEN;
+        if (metaToken) {
+          try {
+            const freqUrl = new URL(`${META_BASE}/${adset.id}/insights`);
+            freqUrl.searchParams.set("access_token", metaToken);
+            freqUrl.searchParams.set("fields", "frequency");
+            freqUrl.searchParams.set("date_preset", "last_3d");
+            const freqRes = await fetch(freqUrl.toString());
+            if (freqRes.ok) {
+              const freqJson = (await freqRes.json()) as any;
+              const freq = parseFloat(freqJson.data?.[0]?.frequency || "0");
+
+              if (freq > freqLimit) {
+                const recentSales = recentMetrics.reduce((sum, m) => sum + m.sales, 0);
+
+                if (recentSales > 0 && freq < freqLimit + 1.5) {
+                  // Tem vendas mas frequência subindo — só alerta (não pausa RMK)
+                  await logAction({
+                    action: "frequency_warning",
+                    entityType: "adset",
+                    entityId: adset.id,
+                    entityName: adset.name,
+                    details: `Frequencia ${freq.toFixed(1)} > limite ${freqLimit}. Tem ${recentSales} vendas, monitorando.`,
+                    source: "automation",
+                  });
+                  if (config.notifyOnAutoAction) {
+                    await sendNotification("auto_action", {
+                      action: "FREQUENCIA SUBINDO",
+                      adset: adset.name,
+                      reason: `Frequencia ${freq.toFixed(1)} (limite: ${freqLimit}). Tem ${recentSales} vendas, monitorando.`,
+                    });
+                  }
+                } else if (!isRemarketing) {
+                  // Prospecção sem vendas com frequência alta — pausa
+                  const freqLock = await canAutomate('adset', adset.id, 'auto_executor');
+                  if (freqLock.allowed) {
+                    const success = await pauseAdset(adset.id);
+                    if (success) {
+                      await acquireLock('adset', adset.id, 'auto_executor', 'pause', adset.dailyBudget, 0);
+                      await logAction({
+                        action: "frequency_pause",
+                        entityType: "adset",
+                        entityId: adset.id,
+                        entityName: adset.name,
+                        details: `Pausado por frequencia ${freq.toFixed(1)} > ${freqLimit}. Vendas 3d: ${recentSales}. Audiencia saturada.`,
+                        source: "automation",
+                      });
+                      if (config.notifyOnAutoAction) {
+                        await sendNotification("auto_action", {
+                          action: "PAUSA POR FREQUENCIA",
+                          adset: adset.name,
+                          reason: `Frequencia ${freq.toFixed(1)} > ${freqLimit}. Vendas 3d: ${recentSales}. Audiencia saturada.`,
+                        });
+                      }
+                      console.log(`[AUTO] PAUSA FREQUENCIA ${adset.name} — freq ${freq.toFixed(1)}`);
+                    }
+                  }
+                }
+              }
+            }
+          } catch (freqErr) {
+            // Silently skip frequency check on error
+          }
         }
       }
     }

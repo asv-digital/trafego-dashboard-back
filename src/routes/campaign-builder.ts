@@ -1,9 +1,15 @@
 import { Router, Request, Response } from "express";
 import fs from "fs";
 import path from "path";
+import multer from "multer";
 import prisma from "../prisma";
 import { logAction } from "./actions";
 import { distributeCreative } from "../services/creative-distributor";
+import { sendNotification } from "../services/whatsapp-notifier";
+import { canIncreaseBudget, getCurrentAllocation } from "../services/budget-guard";
+import { CAMPAIGN_TEMPLATES } from "../config/campaign-templates";
+
+const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 500 * 1024 * 1024 } });
 
 const router = Router();
 
@@ -426,6 +432,340 @@ router.post("/distribute", async (req: Request, res: Response) => {
     console.error("[campaign-builder] Distribute error:", message);
     res.status(500).json({ error: message });
   }
+});
+
+// ── NOVOS ENDPOINTS (Ponto 1) ──
+
+// POST /upload — Upload de mídia (arquivo direto) → retorna metaId
+router.post("/upload", upload.single("file"), async (req: Request, res: Response) => {
+  const { ad_account_id, access_token, page_id } = getMetaConfig();
+  if (!access_token || !ad_account_id) {
+    res.status(400).json({ error: "Meta API nao configurada" });
+    return;
+  }
+
+  const file = (req as any).file;
+  if (!file) {
+    res.status(400).json({ error: "Nenhum arquivo enviado" });
+    return;
+  }
+
+  const isVideo = file.mimetype?.startsWith("video/");
+
+  try {
+    let metaId: string;
+    let mediaType: "video" | "image";
+
+    if (isVideo) {
+      mediaType = "video";
+      // Upload vídeo via form-data
+      const FormData = (await import("form-data")).default;
+      const form = new FormData();
+      form.append("source", fs.createReadStream(file.path));
+      form.append("access_token", access_token);
+
+      const uploadRes = await fetch(`${META_BASE}/${ad_account_id}/advideos`, {
+        method: "POST",
+        body: form as any,
+        headers: form.getHeaders(),
+      });
+      const uploadData = (await uploadRes.json()) as any;
+      if (uploadData.error) throw new Error(uploadData.error.message);
+      metaId = uploadData.id;
+
+      // Polling até status ready (max 5min)
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 10000));
+        const statusRes = await fetch(`${META_BASE}/${metaId}?fields=status&access_token=${access_token}`);
+        const statusData = (await statusRes.json()) as any;
+        if (statusData.status?.video_status === "ready") break;
+      }
+    } else {
+      mediaType = "image";
+      const imageBuffer = fs.readFileSync(file.path);
+      const base64 = imageBuffer.toString("base64");
+
+      const uploadRes = await metaPost(`${ad_account_id}/adimages`, {
+        bytes: base64,
+      });
+      const images = uploadRes.images as Record<string, any> | undefined;
+      metaId = images?.bytes?.hash || (images ? Object.values(images)[0]?.hash : "") || "";
+    }
+
+    // Cleanup
+    try { fs.unlinkSync(file.path); } catch {}
+
+    res.json({ type: mediaType, metaId });
+  } catch (err) {
+    try { fs.unlinkSync(file.path); } catch {}
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// POST /preview — Cria ad creative e retorna preview URL
+router.post("/preview", async (req: Request, res: Response) => {
+  const { ad_account_id, access_token, page_id } = getMetaConfig();
+  if (!access_token || !ad_account_id || !page_id) {
+    res.status(400).json({ error: "Meta API ou META_PAGE_ID nao configurada" });
+    return;
+  }
+
+  const { mediaType, metaId, primaryText, headline, description, ctaType, linkUrl } = req.body;
+
+  try {
+    let objectStorySpec: any;
+    if (mediaType === "video") {
+      objectStorySpec = {
+        page_id,
+        video_data: {
+          video_id: metaId,
+          message: primaryText || "",
+          title: headline || "56 Skills de Claude Code",
+          description: description || "",
+          call_to_action: { type: ctaType || "LEARN_MORE", value: { link: linkUrl || "https://bravy.com.br/skills-claude-code" } },
+          link: linkUrl || "https://bravy.com.br/skills-claude-code",
+        },
+      };
+    } else {
+      objectStorySpec = {
+        page_id,
+        link_data: {
+          image_hash: metaId,
+          message: primaryText || "",
+          name: headline || "56 Skills de Claude Code",
+          description: description || "",
+          link: linkUrl || "https://bravy.com.br/skills-claude-code",
+          call_to_action: { type: ctaType || "LEARN_MORE" },
+        },
+      };
+    }
+
+    const creative = await metaPostJSON(`${ad_account_id}/adcreatives`, {
+      name: `Preview - ${headline || "Criativo"} - ${new Date().toISOString().slice(0, 10)}`,
+      object_story_spec: objectStorySpec,
+    });
+
+    // Get preview
+    let previewUrl = null;
+    try {
+      const prevRes = await fetch(`${META_BASE}/${creative.id}/previews?ad_format=DESKTOP_FEED_STANDARD&access_token=${access_token}`);
+      const prevData = (await prevRes.json()) as any;
+      previewUrl = prevData.data?.[0]?.body || null;
+    } catch {}
+
+    res.json({ creativeId: creative.id, previewUrl });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// POST /launch — Cria campanha completa via template
+router.post("/launch", async (req: Request, res: Response) => {
+  const { ad_account_id, access_token } = getMetaConfig();
+  if (!access_token || !ad_account_id) {
+    res.status(400).json({ error: "Meta API nao configurada" });
+    return;
+  }
+
+  const {
+    creativeId, campaignType, campaignName, adSetName, adName,
+    existingCampaignId, lalAudienceId, customBudget,
+    abVariantCreativeId,
+  } = req.body;
+
+  const template = CAMPAIGN_TEMPLATES[campaignType];
+  if (!template) {
+    res.status(400).json({ error: `Template "${campaignType}" nao encontrado` });
+    return;
+  }
+
+  const budgetCentavos = customBudget ? Math.round(customBudget * 100) : template.dailyBudget;
+  const budgetReais = budgetCentavos / 100;
+
+  try {
+    // 1. VERIFICAÇÃO DE BUDGET
+    const budgetCheck = await canIncreaseBudget(campaignName || template.label, budgetReais);
+    if (!budgetCheck.allowed) {
+      res.status(400).json({ error: `Budget excederia limite. ${budgetCheck.reason}` });
+      return;
+    }
+
+    let campaignId = existingCampaignId;
+    const results: any = { campaignId: null, adSetIds: [], adIds: [] };
+
+    // 2. CRIAR CAMPANHA (se não usar existente)
+    if (!campaignId) {
+      const campResult = await metaPost(`${ad_account_id}/campaigns`, {
+        name: campaignName || `[${template.key}] ${new Date().toISOString().slice(0, 10)}`,
+        objective: template.objective,
+        buying_type: template.buyingType,
+        special_ad_categories: "[]",
+        status: "PAUSED",
+      });
+      campaignId = campResult.id;
+    }
+    results.campaignId = campaignId;
+
+    // 3. PREPARAR TARGETING
+    const targeting = { ...template.targeting };
+    if (campaignType === "PROSPECCAO_LAL" && lalAudienceId) {
+      targeting.custom_audiences = [{ id: lalAudienceId }];
+      const buyersId = process.env.META_BUYERS_AUDIENCE_ID || process.env.META_AUDIENCE_BUYERS_ID;
+      if (buyersId) targeting.excluded_custom_audiences = [{ id: buyersId }];
+    }
+    if (campaignType === "REMARKETING") {
+      const abandonersId = process.env.META_AUDIENCE_ABANDONERS_ID;
+      if (abandonersId) targeting.custom_audiences = [{ id: abandonersId }];
+      const buyersId = process.env.META_BUYERS_AUDIENCE_ID || process.env.META_AUDIENCE_BUYERS_ID;
+      if (buyersId) targeting.excluded_custom_audiences = [{ id: buyersId }];
+    }
+
+    // 4. CRIAR AD SET(S)
+    const adsetCount = campaignType === "TESTE_AB" ? 2 : 1;
+    const creativeIds = campaignType === "TESTE_AB" && abVariantCreativeId
+      ? [creativeId, abVariantCreativeId]
+      : [creativeId];
+
+    for (let i = 0; i < adsetCount; i++) {
+      const setName = adsetCount > 1
+        ? `${adSetName || "Ad Set"} - Variante ${String.fromCharCode(65 + i)}`
+        : adSetName || "Ad Set";
+
+      const adsetResult = await metaPost(`${ad_account_id}/adsets`, {
+        campaign_id: campaignId,
+        name: setName,
+        daily_budget: String(budgetCentavos),
+        billing_event: template.billingEvent,
+        optimization_goal: template.optimizationGoal,
+        promoted_object: JSON.stringify({ pixel_id: process.env.META_PIXEL_ID || "", custom_event_type: "PURCHASE" }),
+        targeting: JSON.stringify(targeting),
+        status: "PAUSED",
+        start_time: new Date().toISOString(),
+      });
+      results.adSetIds.push(adsetResult.id);
+
+      // 5. CRIAR AD
+      const adCreativeId = creativeIds[i] || creativeIds[0];
+      const finalAdName = adsetCount > 1
+        ? `${adName || "Ad"} - Variante ${String.fromCharCode(65 + i)}`
+        : adName || "Ad";
+
+      const adResult = await metaPost(`${ad_account_id}/ads`, {
+        adset_id: adsetResult.id,
+        name: finalAdName,
+        creative: JSON.stringify({ creative_id: adCreativeId }),
+        status: "PAUSED",
+      });
+      results.adIds.push(adResult.id);
+    }
+
+    // 6. ATIVAR TUDO
+    await metaPost(`${campaignId}`, { status: "ACTIVE" });
+    for (const asId of results.adSetIds) await metaPost(`${asId}`, { status: "ACTIVE" });
+    for (const adId of results.adIds) await metaPost(`${adId}`, { status: "ACTIVE" });
+
+    // 7. REGISTRAR NO BANCO
+    const now = new Date();
+    const learningPhaseEnd = new Date(now.getTime() + 72 * 60 * 60 * 1000);
+    const finalCampaignName = campaignName || `[${template.key}] ${now.toISOString().slice(0, 10)}`;
+
+    await prisma.campaign.create({
+      data: {
+        name: finalCampaignName,
+        type: template.label,
+        dailyBudget: budgetReais * adsetCount,
+        startDate: now,
+        status: "Ativa",
+        createdInMetaAt: now,
+        learningPhaseEnd,
+        isInLearningPhase: true,
+      },
+    });
+
+    // Se teste A/B, criar CreativeTest
+    if (campaignType === "TESTE_AB" && abVariantCreativeId) {
+      await prisma.creativeTest.create({
+        data: {
+          name: `AB - ${finalCampaignName}`,
+          status: "running",
+          adsetId: results.adSetIds[0],
+          variantA: { adId: results.adIds[0], name: "Variante A" },
+          variantB: { adId: results.adIds[1], name: "Variante B" },
+          startDate: now,
+        },
+      });
+    }
+
+    await logAction({
+      action: "campaign_launched",
+      entityType: "campaign",
+      entityId: campaignId,
+      entityName: finalCampaignName,
+      details: `Tipo: ${template.label} | Budget: R$${budgetReais}/dia | ${results.adSetIds.length} ad set(s) | ${results.adIds.length} ad(s)`,
+      source: "dashboard",
+    });
+
+    await sendNotification("auto_action", {
+      action: "CAMPANHA CRIADA",
+      adset: finalCampaignName,
+      reason: `Tipo: ${template.label} | Budget: R$${budgetReais * adsetCount}/dia | Lancada e ativa.`,
+    });
+
+    res.json({ ...results, status: "active", message: `Campanha lancada: ${finalCampaignName}` });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// GET /audiences — Lista audiências disponíveis
+router.get("/audiences", async (_req: Request, res: Response) => {
+  const { ad_account_id, access_token } = getMetaConfig();
+  if (!access_token || !ad_account_id) {
+    res.json({ audiences: [] });
+    return;
+  }
+
+  try {
+    const url = new URL(`${META_BASE}/${ad_account_id}/customaudiences`);
+    url.searchParams.set("access_token", access_token);
+    url.searchParams.set("fields", "name,approximate_count,subtype");
+    url.searchParams.set("limit", "100");
+    const metaRes = await fetch(url.toString());
+    const metaData = (await metaRes.json()) as any;
+
+    const dbLookalikes = await prisma.lookalikeAudience.findMany();
+
+    res.json({
+      meta_audiences: (metaData.data || []).map((a: any) => ({
+        id: a.id, name: a.name, count: a.approximate_count, subtype: a.subtype,
+      })),
+      lookalikes: dbLookalikes,
+    });
+  } catch (err) {
+    res.json({ meta_audiences: [], lookalikes: [] });
+  }
+});
+
+// GET /campaigns — Lista campanhas ativas para dropdown
+router.get("/campaigns", async (_req: Request, res: Response) => {
+  try {
+    const campaigns = await prisma.campaign.findMany({
+      where: { status: "Ativa" },
+      select: { id: true, name: true, type: true, dailyBudget: true },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ campaigns });
+  } catch {
+    res.json({ campaigns: [] });
+  }
+});
+
+// GET /launch-templates — Retorna templates novos (Ponto 1)
+router.get("/launch-templates", (_req: Request, res: Response) => {
+  const templates = Object.values(CAMPAIGN_TEMPLATES).map(t => ({
+    key: t.key, label: t.label, description: t.description, suggestedBudget: t.suggestedBudgetReais,
+  }));
+  res.json({ templates });
 });
 
 export default router;

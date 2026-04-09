@@ -2,6 +2,7 @@ import prisma from "../prisma";
 import { sendNotification } from "./whatsapp-notifier";
 import { logAction } from "../routes/actions";
 import { canAutomate, acquireLock } from "./automation-coordinator";
+import { canIncreaseBudget, canDecreaseBudget } from "./budget-guard";
 import { NET_PER_SALE } from "../config/constants";
 
 const META_BASE = "https://graph.facebook.com/v19.0";
@@ -157,11 +158,35 @@ export async function executeBudgetRebalance(): Promise<void> {
       }
 
       let success = false;
+      let finalBudget = rec.suggestedBudget;
+
+      if (rec.action === "increase") {
+        const increment = rec.suggestedBudget - rec.currentBudget;
+        const budgetCheck = await canIncreaseBudget(rec.campaignName, increment);
+        if (!budgetCheck.allowed) {
+          console.log(`[REBALANCE] Pulando increase ${rec.campaignName} — ${budgetCheck.reason}`);
+          continue;
+        }
+        if (budgetCheck.maxIncrease < increment) {
+          finalBudget = rec.currentBudget + budgetCheck.maxIncrease;
+          console.log(`[REBALANCE] Escala parcial ${rec.campaignName}: ${budgetCheck.reason}`);
+        }
+      } else if (rec.action === "decrease") {
+        const decrement = rec.currentBudget - rec.suggestedBudget;
+        const budgetCheck = await canDecreaseBudget(rec.campaignName, decrement);
+        if (!budgetCheck.allowed) {
+          console.log(`[REBALANCE] Pulando decrease ${rec.campaignName} — ${budgetCheck.reason}`);
+          continue;
+        }
+        if (budgetCheck.maxDecrease < decrement) {
+          finalBudget = rec.currentBudget - budgetCheck.maxDecrease;
+        }
+      }
 
       if (rec.action === "pause") {
         success = await pauseCampaign(rec.campaignId);
       } else {
-        success = await updateCampaignBudget(rec.campaignId, rec.suggestedBudget);
+        success = await updateCampaignBudget(rec.campaignId, finalBudget);
       }
 
       if (success) {

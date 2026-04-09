@@ -44,6 +44,16 @@ model AutomationConfig {
   autoRotateCreatives     Boolean  @default(false)
   notifyOnAutoAction      Boolean  @default(true)
   cpaPauseThreshold       Float    @default(70)
+  // Ponto 2: Frequência
+  autoPauseFrequency      Boolean  @default(true)
+  frequencyLimitProspection Float  @default(3.0)
+  frequencyLimitRemarketing Float  @default(6.0)
+  // Ponto 5: Teto por tipo
+  budgetCapProspection    Float    @default(250)
+  budgetCapRemarketing    Float    @default(200)
+  budgetCapASC            Float    @default(150)
+  budgetFloorProspection  Float    @default(100)
+  budgetFloorRemarketing  Float    @default(100)
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 }
