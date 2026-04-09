@@ -283,6 +283,65 @@ model AgentHeartbeat {
   updatedAt           DateTime  @updatedAt
 }
 
+// Ponto 9: CPM Trend
+model CPMTrend {
+  id               String   @id @default(uuid())
+  date             DateTime @unique
+  avgCPM           Float
+  avgCTR           Float
+  avgCPA           Float
+  totalSpend       Float
+  totalImpressions Int
+  note             String?
+  createdAt        DateTime @default(now())
+}
+
+// Ponto 10: Comentários de Ads
+model AdComment {
+  id         String    @id @default(uuid())
+  adId       String
+  adName     String
+  commentId  String    @unique
+  message    String
+  authorName String?
+  sentiment  String?   // 'positive' | 'negative' | 'objection_price' | 'objection_trust' | 'question' | 'tag_friend' | 'neutral'
+  createdAt  DateTime
+  analyzedAt DateTime?
+}
+
+model AdCommentSummary {
+  id             String   @id @default(uuid())
+  adId           String
+  adName         String
+  period         String   // '7d'
+  totalComments  Int
+  positive       Int
+  negative       Int
+  objectionPrice Int
+  objectionTrust Int
+  questions      Int
+  tagFriend      Int
+  neutral        Int
+  topObjection   String?
+  recommendation String?
+  analyzedAt     DateTime @default(now())
+
+  @@unique([adId, period])
+}
+
+// Ponto 11: Lookalike Audiences
+model LookalikeAudience {
+  id                   String   @id @default(uuid())
+  name                 String
+  metaAudienceId       String?
+  sourceAudienceId     String
+  percentage           Float
+  buyerCountAtCreation Int
+  status               String   @default("created") // 'created' | 'testing' | 'active' | 'paused'
+  testAdsetId          String?
+  createdAt            DateTime @default(now())
+}
+
 // Melhoria 33: Testes A/B
 model CreativeTest {
   id                 String    @id @default(uuid())

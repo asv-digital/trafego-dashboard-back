@@ -10,6 +10,8 @@ import { resolveActiveTests } from "../services/ab-test-resolver";
 import { applyDaypartingRules } from "../services/dayparting";
 import { cleanExpiredLocks } from "../services/automation-coordinator";
 import { checkCreativeStock } from "../services/creative-stock";
+import { collectAdComments, analyzeComments, generateCommentSummaries } from "../services/comment-analyzer";
+import { checkLookalikeCreation } from "../services/audience-builder";
 import { NET_PER_SALE } from "../config/constants";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -353,6 +355,12 @@ export function startScheduler(): void {
 
   // Creative stock check: daily at 9am (Ponto 7)
   scheduleCreativeStockCheck();
+
+  // Comment analysis: daily at 7am (Ponto 10)
+  scheduleCommentAnalysis();
+
+  // Lookalike creation check: daily at 10am (Ponto 11)
+  scheduleLookalikeCheck();
 }
 
 function scheduleCreativeStockCheck(): void {
@@ -384,6 +392,48 @@ function scheduleCreativeStockCheck(): void {
     }
     scheduleCreativeStockCheck();
   }, msUntil9am);
+}
+
+// ── Comment Analysis (Ponto 10) — daily at 7am ────────────
+
+function scheduleCommentAnalysis(): void {
+  const now = new Date();
+  const next7am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 7, 0, 0, 0);
+  if (now >= next7am) next7am.setDate(next7am.getDate() + 1);
+  const msUntil = next7am.getTime() - now.getTime();
+
+  console.log(`[Scheduler] Analise de comentarios agendada para ${next7am.toISOString()}`);
+
+  setTimeout(async () => {
+    try {
+      await collectAdComments();
+      await analyzeComments();
+      await generateCommentSummaries();
+    } catch (err) {
+      console.error(`[Scheduler] Erro na analise de comentarios: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    scheduleCommentAnalysis();
+  }, msUntil);
+}
+
+// ── Lookalike Check (Ponto 11) — daily at 10am ─────────────
+
+function scheduleLookalikeCheck(): void {
+  const now = new Date();
+  const next10am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 10, 0, 0, 0);
+  if (now >= next10am) next10am.setDate(next10am.getDate() + 1);
+  const msUntil = next10am.getTime() - now.getTime();
+
+  console.log(`[Scheduler] Verificacao de lookalikes agendada para ${next10am.toISOString()}`);
+
+  setTimeout(async () => {
+    try {
+      await checkLookalikeCreation();
+    } catch (err) {
+      console.error(`[Scheduler] Erro na verificacao de lookalikes: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    scheduleLookalikeCheck();
+  }, msUntil);
 }
 
 export async function runNow(): Promise<CollectionSummary> {

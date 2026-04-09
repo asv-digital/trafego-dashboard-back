@@ -807,6 +807,60 @@ router.get("/audience-overlap", async (_req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /cpm-trend — CPM trend over time (Ponto 9)
+// ---------------------------------------------------------------------------
+router.get("/cpm-trend", async (req: Request, res: Response) => {
+  try {
+    const days = parseInt((req.query.days as string) || "30", 10);
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+
+    const trends = await prisma.cPMTrend.findMany({
+      where: { date: { gte: since } },
+      orderBy: { date: "asc" },
+    });
+
+    if (trends.length === 0) {
+      res.json({ current_cpm: 0, avg_30d_cpm: 0, variation: "0%", is_market_spike: false, trend: [], note: null });
+      return;
+    }
+
+    const current = trends[trends.length - 1];
+    const avg30dCPM = trends.length > 1
+      ? trends.slice(0, -1).reduce((sum, t) => sum + t.avgCPM, 0) / (trends.length - 1)
+      : current.avgCPM;
+
+    const variation = avg30dCPM > 0 ? ((current.avgCPM - avg30dCPM) / avg30dCPM) * 100 : 0;
+
+    // Check if CTR is stable (market spike)
+    const avg30dCTR = trends.length > 1
+      ? trends.slice(0, -1).reduce((sum, t) => sum + t.avgCTR, 0) / (trends.length - 1)
+      : current.avgCTR;
+    const ctrVariation = avg30dCTR > 0 ? Math.abs((current.avgCTR - avg30dCTR) / avg30dCTR) * 100 : 0;
+    const isMarketSpike = variation > 20 && ctrVariation < 10;
+
+    res.json({
+      current_cpm: current.avgCPM,
+      avg_30d_cpm: parseFloat(avg30dCPM.toFixed(2)),
+      variation: `${variation > 0 ? "+" : ""}${variation.toFixed(1)}%`,
+      is_market_spike: isMarketSpike,
+      trend: trends.map((t) => ({
+        date: t.date.toISOString().split("T")[0],
+        cpm: t.avgCPM,
+        ctr: parseFloat((t.avgCTR * 100).toFixed(2)),
+        cpa: t.avgCPA,
+        spend: t.totalSpend,
+      })),
+      note: current.note,
+    });
+  } catch (err: unknown) {
+    const error = err as { message?: string };
+    console.error("[metrics] Error fetching CPM trend:", error.message);
+    res.json({ current_cpm: 0, avg_30d_cpm: 0, variation: "0%", is_market_spike: false, trend: [], note: null });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /ad-diagnostics — Quality/Engagement/Conversion rankings (Ponto 6)
 // ---------------------------------------------------------------------------
 router.get("/ad-diagnostics", async (req: Request, res: Response) => {

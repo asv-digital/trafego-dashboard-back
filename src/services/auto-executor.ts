@@ -6,6 +6,42 @@ import { canAutomate, acquireLock } from "./automation-coordinator";
 
 const META_BASE = "https://graph.facebook.com/v19.0";
 
+// Ponto 9: Verificar se CPA alto é causado por CPM do mercado
+async function isCPMSpike(): Promise<{ isSpike: boolean; variation: number; message: string }> {
+  try {
+    const todayDate = new Date();
+    todayDate.setHours(0, 0, 0, 0);
+    const trend = await prisma.cPMTrend.findUnique({ where: { date: todayDate } });
+
+    const thirtyDaysAgo = new Date(todayDate);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const last30d = await prisma.cPMTrend.findMany({
+      where: { date: { gte: thirtyDaysAgo, lt: todayDate } },
+    });
+
+    if (!trend || last30d.length < 7) return { isSpike: false, variation: 0, message: "Dados insuficientes" };
+
+    const avg30dCPM = last30d.reduce((sum, d) => sum + d.avgCPM, 0) / last30d.length;
+    const variation = ((trend.avgCPM - avg30dCPM) / avg30dCPM) * 100;
+
+    // Se CPM subiu >20% MAS CTR se manteve (±10%), é o mercado
+    const avg30dCTR = last30d.reduce((sum, d) => sum + d.avgCTR, 0) / last30d.length;
+    const ctrVariation = avg30dCTR > 0 ? Math.abs((trend.avgCTR - avg30dCTR) / avg30dCTR) * 100 : 0;
+
+    const isMarketSpike = variation > 20 && ctrVariation < 10;
+
+    return {
+      isSpike: isMarketSpike,
+      variation: Math.round(variation),
+      message: isMarketSpike
+        ? `CPM +${Math.round(variation)}% vs media 30d, mas CTR estavel. Provavel aumento de competicao no leilao.`
+        : `CPM ${variation > 0 ? "+" : ""}${Math.round(variation)}% vs media 30d.`,
+    };
+  } catch {
+    return { isSpike: false, variation: 0, message: "Erro ao verificar CPM" };
+  }
+}
+
 async function getAutomationConfig() {
   const config = await prisma.automationConfig.findFirst({
     orderBy: { updatedAt: "desc" },
@@ -434,6 +470,28 @@ export async function executeAutomations(): Promise<void> {
         lastNDays.every((m) => m.sales > 0 && m.cpa > config.breakevenCPA);
 
       if (allAboveBreakeven) {
+        // Ponto 9: Verificar se é spike de CPM do mercado antes de pausar
+        const cpmCheck = await isCPMSpike();
+        if (cpmCheck.isSpike) {
+          await logAction({
+            action: "breakeven_skip_cpm_spike",
+            entityType: "adset",
+            entityId: adset.id,
+            entityName: adset.name,
+            details: `CPA acima do breakeven MAS ${cpmCheck.message} Aguardando normalizacao do mercado.`,
+            source: "automation",
+          });
+          if (config.notifyOnAutoAction) {
+            await sendNotification("auto_action", {
+              action: "AGUARDANDO (CPM DO MERCADO)",
+              adset: adset.name,
+              reason: cpmCheck.message,
+            });
+          }
+          console.log(`[AUTO] SKIP breakeven ${adset.name} — ${cpmCheck.message}`);
+          continue;
+        }
+
         const lockCheck = await canAutomate('adset', adset.id, 'auto_executor');
         if (!lockCheck.allowed) {
           console.log(`[AUTO] Pulando breakeven ${adset.name} — ${lockCheck.reason}`);

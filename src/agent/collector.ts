@@ -352,6 +352,61 @@ async function saveThruplayData(insights: MetaInsight[]): Promise<void> {
   if (updated > 0) console.log(`  [+] ${updated} metrics atualizados com thruplay.`);
 }
 
+// ── CPM Trend (Ponto 9) ─────────────────────────────────────
+
+async function saveCPMTrend(): Promise<void> {
+  try {
+    const todayDate = new Date();
+    todayDate.setHours(0, 0, 0, 0);
+    const todayEnd = new Date(todayDate);
+    todayEnd.setHours(23, 59, 59, 999);
+
+    const todayMetrics = await prisma.metricEntry.aggregate({
+      where: { date: { gte: todayDate, lte: todayEnd } },
+      _sum: { investment: true, impressions: true, clicks: true, sales: true },
+    });
+
+    const spend = todayMetrics._sum.investment || 0;
+    const impressions = todayMetrics._sum.impressions || 0;
+    const clicks = todayMetrics._sum.clicks || 0;
+    const sales = todayMetrics._sum.sales || 0;
+
+    if (impressions === 0) return;
+
+    const avgCPM = (spend / impressions) * 1000;
+    const avgCTR = clicks / impressions;
+    const avgCPA = sales > 0 ? spend / sales : 0;
+
+    // Comparar com média dos últimos 30 dias
+    const thirtyDaysAgo = new Date(todayDate);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const last30d = await prisma.cPMTrend.findMany({
+      where: { date: { gte: thirtyDaysAgo, lt: todayDate } },
+    });
+
+    const avg30dCPM = last30d.length > 0
+      ? last30d.reduce((sum, d) => sum + d.avgCPM, 0) / last30d.length
+      : avgCPM;
+
+    const cpmVariation = avg30dCPM > 0 ? ((avgCPM - avg30dCPM) / avg30dCPM) * 100 : 0;
+
+    let note: string | null = null;
+    if (cpmVariation > 25) note = `CPM +${cpmVariation.toFixed(0)}% vs media 30d. Possivel aumento de competicao no leilao.`;
+    if (cpmVariation < -20) note = `CPM ${cpmVariation.toFixed(0)}% vs media 30d. Menos competicao — oportunidade de escalar.`;
+
+    await prisma.cPMTrend.upsert({
+      where: { date: todayDate },
+      create: { date: todayDate, avgCPM: parseFloat(avgCPM.toFixed(2)), avgCTR: parseFloat(avgCTR.toFixed(6)), avgCPA: parseFloat(avgCPA.toFixed(2)), totalSpend: parseFloat(spend.toFixed(2)), totalImpressions: impressions, note },
+      update: { avgCPM: parseFloat(avgCPM.toFixed(2)), avgCTR: parseFloat(avgCTR.toFixed(6)), avgCPA: parseFloat(avgCPA.toFixed(2)), totalSpend: parseFloat(spend.toFixed(2)), totalImpressions: impressions, note },
+    });
+
+    if (note) console.log(`  [CPM] ${note}`);
+  } catch (err) {
+    console.error("[CPM] Erro ao salvar CPM trend:", err);
+  }
+}
+
 // ── Collection summary type ─────────────────────────────────
 
 export interface CollectionSummary {
@@ -434,6 +489,9 @@ export async function runCollection(): Promise<CollectionSummary> {
   console.log("[4b] Salvando diagnostics e thruplay...");
   await saveAdDiagnostics(insights);
   await saveThruplayData(insights);
+
+  // 4c. Save CPM Trend (Ponto 9)
+  await saveCPMTrend();
 
   // Summary
   const totalInvestment = consolidated.reduce((s, m) => s + m.investment, 0);
