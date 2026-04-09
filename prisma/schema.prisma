@@ -234,6 +234,32 @@ model NotificationLog {
   createdAt DateTime @default(now())
 }
 
+// Ponto 1: Coordenação entre automações (Automation Lock)
+model AutomationLock {
+  id            String   @id @default(uuid())
+  entityType    String   // 'adset' | 'campaign'
+  entityId      String   // ID do ad set ou campanha
+  lockedBy      String   // 'auto_executor' | 'budget_rebalancer' | 'dayparting' | 'ab_resolver'
+  action        String   // 'scale' | 'pause' | 'budget_change' | 'daypart_reduce' | 'daypart_restore'
+  previousValue Float?   // budget antes da ação
+  newValue      Float?   // budget depois da ação
+  expiresAt     DateTime // lock expira automaticamente
+  createdAt     DateTime @default(now())
+
+  @@unique([entityType, entityId])
+}
+
+// Ponto 2: Dead Man's Switch (Heartbeat)
+model AgentHeartbeat {
+  id                  String    @id @default(uuid())
+  lastCollectionAt    DateTime?
+  lastSnapshotAt      DateTime?
+  lastAutomationAt    DateTime?
+  consecutiveFailures Int       @default(0)
+  lastError           String?
+  updatedAt           DateTime  @updatedAt
+}
+
 // Melhoria 33: Testes A/B
 model CreativeTest {
   id                 String    @id @default(uuid())

@@ -19,6 +19,7 @@ import notificationsRoutes from "./routes/notifications";
 import testsRoutes from "./routes/tests";
 import campaignBuilderRoutes from "./routes/campaign-builder";
 import automationsRoutes from "./routes/automations";
+import automationLocksRoutes from "./routes/automation-locks";
 import reportsRoutes from "./routes/reports";
 import { startScheduler } from "./agent/scheduler";
 
@@ -47,6 +48,7 @@ app.use("/api/notifications", notificationsRoutes);
 app.use("/api/tests", testsRoutes);
 app.use("/api/campaign-builder", campaignBuilderRoutes);
 app.use("/api/automations", automationsRoutes);
+app.use("/api/automations", automationLocksRoutes);
 app.use("/api/reports", reportsRoutes);
 
 // Health check (Melhoria 19)

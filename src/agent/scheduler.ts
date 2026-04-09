@@ -5,6 +5,11 @@ import { PrismaClient } from "@prisma/client";
 import { updateLearningPhaseStatus } from "../services/learning-phase";
 import { executeAutomations } from "../services/auto-executor";
 import { sendNotification } from "../services/whatsapp-notifier";
+import { executeBudgetRebalance, rebalanceWithinCampaigns } from "../services/budget-rebalancer";
+import { resolveActiveTests } from "../services/ab-test-resolver";
+import { applyDaypartingRules } from "../services/dayparting";
+import { cleanExpiredLocks } from "../services/automation-coordinator";
+import { NET_PER_SALE } from "../config/constants";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -20,6 +25,7 @@ let intervalHandle: ReturnType<typeof setInterval> | null = null;
 let dailySummaryTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
+const ONE_HOUR_MS = 60 * 60 * 1000;
 const STARTUP_DELAY_MS = 30 * 1000;
 
 // ── Internal runner ─────────────────────────────────────────
@@ -43,6 +49,14 @@ async function executeCollection(): Promise<CollectionSummary> {
   console.log(`[Scheduler] Iniciando coleta em ${startedAt}`);
 
   try {
+    // 0. Limpar locks expirados
+    try {
+      const cleaned = await cleanExpiredLocks();
+      if (cleaned > 0) console.log(`[Scheduler] ${cleaned} locks expirados removidos.`);
+    } catch (err) {
+      console.error(`[Scheduler] Erro ao limpar locks: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // 1. Coletar métricas do Meta
     const result = await runCollection();
     lastRun = new Date().toISOString();
@@ -70,10 +84,43 @@ async function executeCollection(): Promise<CollectionSummary> {
       console.error(`[Scheduler] Erro ao executar automações: ${err instanceof Error ? err.message : String(err)}`);
     }
 
+    // 5. Budget rebalance
+    try {
+      await executeBudgetRebalance();
+    } catch (err) {
+      console.error(`[Scheduler] Erro no budget rebalance: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // 6. Rebalance intra-campanha (nível ad set)
+    try {
+      await rebalanceWithinCampaigns();
+    } catch (err) {
+      console.error(`[Scheduler] Erro no rebalance intra-campanha: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // 7. Resolver testes A/B
+    try {
+      await resolveActiveTests();
+    } catch (err) {
+      console.error(`[Scheduler] Erro ao resolver testes A/B: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     return result;
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
     console.error(`[Scheduler] Erro na coleta: ${errorMsg}`);
+
+    // Heartbeat: registrar falha
+    try {
+      await prisma.agentHeartbeat.upsert({
+        where: { id: "singleton" },
+        create: { id: "singleton", consecutiveFailures: 1, lastError: errorMsg },
+        update: { consecutiveFailures: { increment: 1 }, lastError: errorMsg },
+      });
+    } catch (hbErr) {
+      console.error(`[Heartbeat] Erro ao registrar falha: ${hbErr instanceof Error ? hbErr.message : String(hbErr)}`);
+    }
+
     lastRun = new Date().toISOString();
     lastResult = {
       totalInvestment: 0,
@@ -115,6 +162,28 @@ function scheduleDailySummary(): void {
 
 async function sendDailySummary(): Promise<void> {
   try {
+    // Verificação de saúde do heartbeat antes do resumo
+    const heartbeat = await prisma.agentHeartbeat.findUnique({ where: { id: "singleton" } });
+    if (heartbeat) {
+      if (heartbeat.lastCollectionAt) {
+        const hoursSinceCollection = (Date.now() - heartbeat.lastCollectionAt.getTime()) / (1000 * 60 * 60);
+        if (hoursSinceCollection > 8) {
+          await sendNotification("alert_critical", {
+            type: "AGENTE PARADO",
+            detail: `Última coleta há ${Math.round(hoursSinceCollection)}h. Campanhas rodando sem monitoramento.`,
+            action: "Verifique trafego.bravy.com.br/api/health AGORA.",
+          });
+        }
+      }
+      if (heartbeat.consecutiveFailures >= 3) {
+        await sendNotification("alert_critical", {
+          type: "AGENTE COM FALHAS",
+          detail: `${heartbeat.consecutiveFailures} falhas consecutivas. Último erro: ${heartbeat.lastError}`,
+          action: "Verifique logs do servidor em Coolify.",
+        });
+      }
+    }
+
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     const startOfYesterday = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
@@ -127,7 +196,7 @@ async function sendDailySummary(): Promise<void> {
     const totalSpend = metrics.reduce((s, m) => s + m.investment, 0);
     const totalSales = metrics.reduce((s, m) => s + m.sales, 0);
     const cpa = totalSales > 0 ? totalSpend / totalSales : 0;
-    const revenue = totalSales * 93.6;
+    const revenue = totalSales * NET_PER_SALE;
     const roas = totalSpend > 0 ? revenue / totalSpend : 0;
 
     // Get alerts count
@@ -187,7 +256,7 @@ export async function saveDailySnapshot(): Promise<void> {
 
   const totalSpend = entries.reduce((sum, e) => sum + e.investment, 0);
   const totalSales = entries.reduce((sum, e) => sum + e.sales, 0);
-  const totalRevenue = totalSales * 93.6;
+  const totalRevenue = totalSales * NET_PER_SALE;
   const avgCpa = totalSales > 0 ? totalSpend / totalSales : 0;
   const avgRoas = totalSpend > 0 ? totalRevenue / totalSpend : 0;
 
@@ -220,7 +289,7 @@ export async function saveDailySnapshot(): Promise<void> {
     const b = breakdownMap[e.campaignId];
     b.spend += e.investment;
     b.sales += e.sales;
-    b.revenue += e.sales * 93.6;
+    b.revenue += e.sales * NET_PER_SALE;
     b.impressions += e.impressions;
     b.clicks += e.clicks;
   }
@@ -270,6 +339,16 @@ export function startScheduler(): void {
 
   // Schedule daily summary at 8am
   scheduleDailySummary();
+
+  // Dayparting: run every 1 hour
+  setInterval(async () => {
+    try {
+      await applyDaypartingRules();
+    } catch (err) {
+      console.error(`[Scheduler] Erro no dayparting: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, ONE_HOUR_MS);
+  console.log("[Scheduler] Dayparting agendado a cada 1 hora.");
 }
 
 export async function runNow(): Promise<CollectionSummary> {

@@ -7,6 +7,7 @@ import { PrismaClient } from "@prisma/client";
 
 import type { AgentConfig, MetaInsight, ConsolidatedMetric } from "./types";
 import { MetaClient, getActionValue, getLandingPageViews, getInitiateCheckouts, getOutboundClicks, getVideoPlays, getThreeSecondViews } from "./meta-client";
+import { PRODUCT_PRICE, GATEWAY_FEE, NET_PER_SALE } from "../config/constants";
 
 // ── Load config (env vars first, fallback to file) ───────────
 
@@ -26,9 +27,9 @@ function loadConfig(): AgentConfig {
       },
       business: {
         product_name: "56 Skills de Claude Code",
-        product_price: 97,
-        gateway_fee_percent: 3.5,
-        net_revenue_per_sale: 93.6,
+        product_price: PRODUCT_PRICE,
+        gateway_fee_percent: GATEWAY_FEE * 100,
+        net_revenue_per_sale: NET_PER_SALE,
         daily_budget_target: Number(process.env.DAILY_BUDGET_TARGET) || 500,
         cpa_target: Number(process.env.CPA_TARGET) || 50,
         cpa_alert: Number(process.env.CPA_ALERT) || 70,
@@ -49,9 +50,9 @@ function loadConfig(): AgentConfig {
       kirvano: { api_key: "", product_id: "" },
       business: {
         product_name: "56 Skills de Claude Code",
-        product_price: 97,
-        gateway_fee_percent: 3.5,
-        net_revenue_per_sale: 93.6,
+        product_price: PRODUCT_PRICE,
+        gateway_fee_percent: GATEWAY_FEE * 100,
+        net_revenue_per_sale: NET_PER_SALE,
         daily_budget_target: 500,
         cpa_target: 50,
         cpa_alert: 70,
@@ -367,6 +368,17 @@ export async function runCollection(): Promise<CollectionSummary> {
   }
 
   console.log("\nAgente finalizado com sucesso.");
+
+  // Heartbeat: coleta bem-sucedida
+  try {
+    await prisma.agentHeartbeat.upsert({
+      where: { id: "singleton" },
+      create: { id: "singleton", lastCollectionAt: new Date(), consecutiveFailures: 0 },
+      update: { lastCollectionAt: new Date(), consecutiveFailures: 0, lastError: null },
+    });
+  } catch (hbErr) {
+    console.error(`[Heartbeat] Erro ao atualizar heartbeat: ${hbErr}`);
+  }
 
   return {
     totalInvestment,

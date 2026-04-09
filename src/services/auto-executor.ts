@@ -1,6 +1,8 @@
 import prisma from "../prisma";
 import { sendNotification } from "./whatsapp-notifier";
 import { logAction } from "../routes/actions";
+import { NET_PER_SALE } from "../config/constants";
+import { canAutomate, acquireLock } from "./automation-coordinator";
 
 const META_BASE = "https://graph.facebook.com/v19.0";
 
@@ -14,7 +16,7 @@ async function getAutomationConfig() {
     autoPauseNoSales: true,
     autoPauseSpendLimit: 200,
     autoPauseBreakeven: true,
-    breakevenCPA: 93.60,
+    breakevenCPA: NET_PER_SALE,
     breakevenMinDays: 3,
     autoScaleWinners: true,
     autoScaleCPAThreshold: 50,
@@ -45,6 +47,56 @@ async function pauseAdset(adsetId: string): Promise<boolean> {
     return res.ok;
   } catch (err) {
     console.error(`[AUTO] Erro ao pausar adset ${adsetId}:`, err);
+    return false;
+  }
+}
+
+async function scaleCampaignBudget(campaignId: string, newBudgetReais: number): Promise<boolean> {
+  const metaToken = process.env.META_ACCESS_TOKEN;
+  if (!metaToken) return false;
+
+  try {
+    const res = await fetch(`${META_BASE}/${campaignId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        daily_budget: Math.round(newBudgetReais * 100),
+        access_token: metaToken,
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error(`[AUTO] Erro ao escalar campanha ${campaignId}: ${errBody}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(`[AUTO] Erro ao escalar campanha ${campaignId}:`, err);
+    return false;
+  }
+}
+
+async function pauseCampaign(campaignId: string): Promise<boolean> {
+  const metaToken = process.env.META_ACCESS_TOKEN;
+  if (!metaToken) return false;
+
+  try {
+    const res = await fetch(`${META_BASE}/${campaignId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        status: "PAUSED",
+        access_token: metaToken,
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error(`[AUTO] Erro ao pausar campanha ${campaignId}: ${errBody}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(`[AUTO] Erro ao pausar campanha ${campaignId}:`, err);
     return false;
   }
 }
@@ -83,6 +135,7 @@ interface AdsetWithMetrics {
   campaignId: string;
   campaignName: string;
   isInLearningPhase: boolean;
+  isASC: boolean;
   hoursActive: number;
   dailyBudget: number;
   totalSpend: number;
@@ -149,7 +202,7 @@ async function getActiveAdsetMetrics(): Promise<AdsetWithMetrics[]> {
         spend,
         sales,
         cpa: sales > 0 ? spend / sales : 0,
-        revenue: sales * 93.6,
+        revenue: sales * NET_PER_SALE,
       });
     }
 
@@ -179,6 +232,7 @@ async function getActiveAdsetMetrics(): Promise<AdsetWithMetrics[]> {
     for (const [adsetId, data] of adsetMap) {
       const dbCampaign = campaignByName.get(data.campaignName);
       const isInLearningPhase = dbCampaign?.isInLearningPhase ?? false;
+      const isASC = data.campaignName.toUpperCase().includes("ASC") || data.campaignName.toUpperCase().includes("ADVANTAGE");
 
       let hoursActive = 999;
       if (dbCampaign?.createdInMetaAt) {
@@ -197,6 +251,7 @@ async function getActiveAdsetMetrics(): Promise<AdsetWithMetrics[]> {
         campaignId: data.campaignId,
         campaignName: data.campaignName,
         isInLearningPhase,
+        isASC,
         hoursActive,
         dailyBudget: adsetBudgets.get(adsetId) || 0,
         totalSpend,
@@ -218,6 +273,44 @@ export async function executeAutomations(): Promise<void> {
 
   console.log(`[AUTO] Avaliando ${adsets.length} adsets ativos...`);
 
+  // REGRA 0: PROTEÇÃO DE BUDGET DIÁRIO GLOBAL
+  const dailyBudgetTarget = Number(process.env.DAILY_BUDGET_TARGET) || 500;
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayEnd = new Date();
+  todayEnd.setHours(23, 59, 59, 999);
+
+  const todayMetrics = await prisma.metricEntry.findMany({
+    where: { date: { gte: todayStart, lte: todayEnd } },
+  });
+  const todaySpend = todayMetrics.reduce((s, m) => s + m.investment, 0);
+
+  if (todaySpend >= dailyBudgetTarget) {
+    console.log(`[AUTO] BUDGET DIÁRIO ATINGIDO: R$${todaySpend.toFixed(0)} >= R$${dailyBudgetTarget}. Pausando todos os ad sets.`);
+    let pausedCount = 0;
+    for (const adset of adsets) {
+      const success = await pauseAdset(adset.id);
+      if (success) pausedCount++;
+    }
+
+    await logAction({
+      action: "emergency_budget_pause",
+      entityType: "account",
+      entityId: "global",
+      entityName: "Budget diário global",
+      details: `Gasto do dia R$${todaySpend.toFixed(0)} atingiu limite de R$${dailyBudgetTarget}. ${pausedCount} ad sets pausados.`,
+      source: "automation",
+    });
+
+    await sendNotification("alert_critical", {
+      type: "BUDGET DIÁRIO ATINGIDO",
+      detail: `Gasto: R$${todaySpend.toFixed(0)} / Limite: R$${dailyBudgetTarget}`,
+      action: `${pausedCount} ad sets pausados automaticamente`,
+    });
+
+    return; // Não executar mais nenhuma automação
+  }
+
   for (const adset of adsets) {
     // Respeitar fase de aprendizado (Passo 9)
     if (config.respectLearningPhase && adset.isInLearningPhase) {
@@ -225,10 +318,94 @@ export async function executeAutomations(): Promise<void> {
       continue;
     }
 
+    // ASC: pular regras de adset, aplicar apenas na campanha
+    if (adset.isASC) {
+      // REGRA ASC-PAUSE: gasto > limite sem vendas → pausar campanha
+      if (config.autoPauseNoSales && adset.totalSpend > config.autoPauseSpendLimit && adset.sales === 0) {
+        const lockCheck = await canAutomate('campaign', adset.campaignId, 'auto_executor');
+        if (!lockCheck.allowed) {
+          console.log(`[AUTO] Pulando ASC ${adset.campaignName} — ${lockCheck.reason}`);
+          continue;
+        }
+
+        const success = await pauseCampaign(adset.campaignId);
+        if (success) {
+          await acquireLock('campaign', adset.campaignId, 'auto_executor', 'pause', adset.dailyBudget, 0);
+          await logAction({
+            action: "auto_pause",
+            entityType: "campaign",
+            entityId: adset.campaignId,
+            entityName: `${adset.campaignName} (ASC)`,
+            details: `Auto-pause ASC: R$${adset.totalSpend.toFixed(0)} gastos, 0 vendas. Limite: R$${config.autoPauseSpendLimit}.`,
+            source: "automation",
+          });
+          if (config.notifyOnAutoAction) {
+            await sendNotification("auto_action", {
+              action: "PAUSADO (ASC campanha)",
+              adset: adset.campaignName,
+              reason: `R$${adset.totalSpend.toFixed(0)} gastos sem nenhuma venda`,
+            });
+          }
+          console.log(`[AUTO] PAUSADO ASC campanha ${adset.campaignName}`);
+        }
+        continue;
+      }
+
+      // REGRA ASC-SCALE: CPA bom → escalar budget da campanha
+      if (config.autoScaleWinners) {
+        const lastNDays = adset.metrics.slice(-config.autoScaleMinDays);
+        const allBelowThreshold =
+          lastNDays.length >= config.autoScaleMinDays &&
+          lastNDays.every((m) => m.sales > 0 && m.cpa > 0 && m.cpa < config.autoScaleCPAThreshold);
+
+        if (allBelowThreshold && adset.dailyBudget < config.autoScaleMaxBudget) {
+          const lockCheck = await canAutomate('campaign', adset.campaignId, 'auto_executor');
+          if (!lockCheck.allowed) {
+            console.log(`[AUTO] Pulando scale ASC ${adset.campaignName} — ${lockCheck.reason}`);
+            continue;
+          }
+
+          const newBudget = Math.min(
+            Math.round(adset.dailyBudget * (1 + config.autoScalePercent / 100)),
+            config.autoScaleMaxBudget
+          );
+
+          const success = await scaleCampaignBudget(adset.campaignId, newBudget);
+          if (success) {
+            await acquireLock('campaign', adset.campaignId, 'auto_executor', 'scale', adset.dailyBudget, newBudget);
+            await logAction({
+              action: "auto_scale",
+              entityType: "campaign",
+              entityId: adset.campaignId,
+              entityName: `${adset.campaignName} (ASC)`,
+              details: `Auto-scale ASC: CPA <R$${config.autoScaleCPAThreshold} por ${config.autoScaleMinDays} dias. Budget campanha R$${adset.dailyBudget} → R$${newBudget}.`,
+              source: "automation",
+            });
+            if (config.notifyOnAutoAction) {
+              await sendNotification("auto_action", {
+                action: "ESCALADO (ASC campanha)",
+                adset: adset.campaignName,
+                reason: `CPA <R$${config.autoScaleCPAThreshold} por ${config.autoScaleMinDays}d. Budget campanha ${adset.dailyBudget} → ${newBudget}`,
+              });
+            }
+            console.log(`[AUTO] ESCALADO ASC campanha ${adset.campaignName} — Budget R$${adset.dailyBudget} → R$${newBudget}`);
+          }
+        }
+      }
+      continue;
+    }
+
     // REGRA 1: AUTO-PAUSE — Gasto > limite sem NENHUMA venda (ação imediata)
     if (config.autoPauseNoSales && adset.totalSpend > config.autoPauseSpendLimit && adset.sales === 0) {
+      const lockCheck = await canAutomate('adset', adset.id, 'auto_executor');
+      if (!lockCheck.allowed) {
+        console.log(`[AUTO] Pulando ${adset.name} — ${lockCheck.reason}`);
+        continue;
+      }
+
       const success = await pauseAdset(adset.id);
       if (success) {
+        await acquireLock('adset', adset.id, 'auto_executor', 'pause', adset.dailyBudget, 0);
         await logAction({
           action: "auto_pause",
           entityType: "adset",
@@ -257,6 +434,12 @@ export async function executeAutomations(): Promise<void> {
         lastNDays.every((m) => m.sales > 0 && m.cpa > config.breakevenCPA);
 
       if (allAboveBreakeven) {
+        const lockCheck = await canAutomate('adset', adset.id, 'auto_executor');
+        if (!lockCheck.allowed) {
+          console.log(`[AUTO] Pulando breakeven ${adset.name} — ${lockCheck.reason}`);
+          continue;
+        }
+
         const avgCPA = lastNDays.reduce((sum, m) => sum + m.cpa, 0) / lastNDays.length;
         const totalSpendPeriod = lastNDays.reduce((sum, m) => sum + m.spend, 0);
         const totalRevenuePeriod = lastNDays.reduce((sum, m) => sum + m.revenue, 0);
@@ -264,6 +447,7 @@ export async function executeAutomations(): Promise<void> {
 
         const success = await pauseAdset(adset.id);
         if (success) {
+          await acquireLock('adset', adset.id, 'auto_executor', 'pause', adset.dailyBudget, 0);
           await logAction({
             action: "auto_pause_breakeven",
             entityType: "adset",
@@ -295,6 +479,12 @@ export async function executeAutomations(): Promise<void> {
         lastNDays.every((m) => m.sales > 0 && m.cpa > 0 && m.cpa < config.autoScaleCPAThreshold);
 
       if (allBelowThreshold && adset.dailyBudget < config.autoScaleMaxBudget) {
+        const lockCheck = await canAutomate('adset', adset.id, 'auto_executor');
+        if (!lockCheck.allowed) {
+          console.log(`[AUTO] Pulando scale ${adset.name} — ${lockCheck.reason}`);
+          continue;
+        }
+
         const newBudget = Math.min(
           Math.round(adset.dailyBudget * (1 + config.autoScalePercent / 100)),
           config.autoScaleMaxBudget
@@ -302,6 +492,7 @@ export async function executeAutomations(): Promise<void> {
 
         const success = await updateAdsetBudget(adset.id, newBudget);
         if (success) {
+          await acquireLock('adset', adset.id, 'auto_executor', 'scale', adset.dailyBudget, newBudget);
           await logAction({
             action: "auto_scale",
             entityType: "adset",

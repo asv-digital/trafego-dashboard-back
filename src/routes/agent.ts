@@ -1,5 +1,7 @@
 import { Router, Request, Response } from "express";
 import { getStatus, runNow } from "../agent/scheduler";
+import { PRODUCT_PRICE, GATEWAY_FEE, NET_PER_SALE } from "../config/constants";
+import prisma from "../prisma";
 
 const router = Router();
 
@@ -29,9 +31,9 @@ router.get("/config", (_req: Request, res: Response) => {
   res.json({
     business: {
       product_name: "56 Skills de Claude Code",
-      product_price: 97,
-      gateway_fee_percent: 3.5,
-      net_revenue_per_sale: 93.6,
+      product_price: PRODUCT_PRICE,
+      gateway_fee_percent: GATEWAY_FEE * 100,
+      net_revenue_per_sale: NET_PER_SALE,
       daily_budget_target: Number(process.env.DAILY_BUDGET_TARGET) || 500,
       cpa_target: Number(process.env.CPA_TARGET) || 50,
       cpa_alert: Number(process.env.CPA_ALERT) || 70,
@@ -133,6 +135,62 @@ router.post("/refresh-token", async (_req: Request, res: Response) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     res.status(500).json({ error: "Failed to refresh token", details: message });
+  }
+});
+
+// GET /api/agent/heartbeat — Dead Man's Switch status
+router.get("/heartbeat", async (_req: Request, res: Response) => {
+  try {
+    const heartbeat = await prisma.agentHeartbeat.findUnique({ where: { id: "singleton" } });
+
+    if (!heartbeat || !heartbeat.lastCollectionAt) {
+      res.json({
+        status: "dead",
+        lastCollectionAt: null,
+        hoursSinceCollection: null,
+        consecutiveFailures: heartbeat?.consecutiveFailures ?? 0,
+        lastError: heartbeat?.lastError ?? "Nenhuma coleta registrada",
+        campaignsActive: false,
+        dailySpendSoFar: 0,
+      });
+      return;
+    }
+
+    const hoursSinceCollection = (Date.now() - heartbeat.lastCollectionAt.getTime()) / (1000 * 60 * 60);
+    const failures = heartbeat.consecutiveFailures;
+
+    let status: "healthy" | "warning" | "critical" | "dead";
+    if (hoursSinceCollection > 24) {
+      status = "dead";
+    } else if (hoursSinceCollection > 8 || failures >= 3) {
+      status = "critical";
+    } else if (hoursSinceCollection > 5 || failures >= 1) {
+      status = "warning";
+    } else {
+      status = "healthy";
+    }
+
+    // Gasto do dia
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayMetrics = await prisma.metricEntry.findMany({
+      where: { date: { gte: todayStart } },
+    });
+    const dailySpendSoFar = todayMetrics.reduce((s, m) => s + m.investment, 0);
+
+    const activeCampaigns = await prisma.campaign.count({ where: { status: "Ativa" } });
+
+    res.json({
+      status,
+      lastCollectionAt: heartbeat.lastCollectionAt.toISOString(),
+      hoursSinceCollection: parseFloat(hoursSinceCollection.toFixed(1)),
+      consecutiveFailures: failures,
+      lastError: heartbeat.lastError,
+      campaignsActive: activeCampaigns > 0,
+      dailySpendSoFar: parseFloat(dailySpendSoFar.toFixed(2)),
+    });
+  } catch (err) {
+    res.status(500).json({ status: "dead", error: err instanceof Error ? err.message : String(err) });
   }
 });
 
