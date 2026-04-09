@@ -7,19 +7,45 @@ datasource db {
 }
 
 model Campaign {
-  id          String   @id @default(cuid())
-  name        String
-  type        String
-  audience    String?
-  dailyBudget Float
-  startDate   DateTime
-  status      String   @default("Ativa")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                String    @id @default(cuid())
+  name              String
+  type              String
+  audience          String?
+  dailyBudget       Float
+  startDate         DateTime
+  status            String    @default("Ativa")
+  // Fase de aprendizado (Passo 9)
+  createdInMetaAt   DateTime?
+  learningPhaseEnd  DateTime?
+  isInLearningPhase Boolean   @default(false)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   metrics   MetricEntry[]
   creatives Creative[]
   sales     Sale[]
+}
+
+// Configuração de automação do agente (Passo 6)
+model AutomationConfig {
+  id                      String   @id @default(uuid())
+  autoPauseNoSales        Boolean  @default(true)
+  autoPauseSpendLimit     Float    @default(200)
+  autoPauseBreakeven      Boolean  @default(true)
+  breakevenCPA            Float    @default(93.60)
+  breakevenMinDays        Int      @default(3)
+  autoScaleWinners        Boolean  @default(true)
+  autoScaleCPAThreshold   Float    @default(50)
+  autoScalePercent        Float    @default(20)
+  autoScaleMinDays        Int      @default(3)
+  autoScaleMaxBudget      Float    @default(200)
+  respectLearningPhase    Boolean  @default(true)
+  learningPhaseHours      Int      @default(72)
+  autoRotateCreatives     Boolean  @default(false)
+  notifyOnAutoAction      Boolean  @default(true)
+  cpaPauseThreshold       Float    @default(70)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 }
 
 model MetricEntry {
@@ -181,21 +207,31 @@ model MonthlyGoal {
   updatedAt   DateTime @updatedAt
 }
 
-// Melhoria 32: Notificações
+// Notificações WhatsApp (Passo 0)
 model NotificationConfig {
-  id        String   @id @default(uuid())
-  config    Json
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                    String   @id @default(uuid())
+  whatsappProvider      String   @default("z-api") // "z-api" ou "evolution"
+  whatsappInstanceId    String?
+  whatsappToken         String?
+  whatsappPhone         String?  // 5511999999999
+  enabled               Boolean  @default(true)
+  notifyAutoActions     Boolean  @default(true)
+  notifyCreativeActions Boolean  @default(true)
+  notifyLearningPhase   Boolean  @default(true)
+  notifyAlerts          Boolean  @default(true)
+  notifyDailySummary    Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 }
 
 model NotificationLog {
-  id      String   @id @default(uuid())
-  rule    String
-  message String
-  channel String
-  status  String
-  sentAt  DateTime @default(now())
+  id        String   @id @default(uuid())
+  type      String   // 'auto_action' | 'creative' | 'learning_phase' | 'alert' | 'daily_summary'
+  message   String
+  channel   String   @default("whatsapp")
+  status    String   // 'sent' | 'failed'
+  error     String?
+  createdAt DateTime @default(now())
 }
 
 // Melhoria 33: Testes A/B

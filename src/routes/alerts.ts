@@ -14,8 +14,20 @@ interface Alert {
   value?: number;
 }
 
+async function getThresholds() {
+  const config = await prisma.automationConfig.findFirst({ orderBy: { updatedAt: "desc" } });
+  return {
+    cpaPauseThreshold: config?.cpaPauseThreshold ?? 70,
+    autoScaleCPAThreshold: config?.autoScaleCPAThreshold ?? 50,
+    autoPauseSpendLimit: config?.autoPauseSpendLimit ?? 200,
+    minDays: 3, // Passo 10: sempre 3 dias
+  };
+}
+
 // GET generated alerts
 router.get("/", async (_req: Request, res: Response) => {
+  const thresholds = await getThresholds();
+
   const campaigns = await prisma.campaign.findMany({
     include: {
       metrics: { orderBy: { date: "desc" } },
@@ -27,16 +39,19 @@ router.get("/", async (_req: Request, res: Response) => {
   for (const campaign of campaigns) {
     if (campaign.metrics.length === 0) continue;
 
+    // Ignorar campanhas em fase de aprendizado (Passo 9)
+    if (campaign.isInLearningPhase) continue;
+
     const latest = campaign.metrics[0];
-    const latestTwo = campaign.metrics.slice(0, 2);
+    const latestThree = campaign.metrics.slice(0, thresholds.minDays);
 
     const cpa = latest.sales > 0 ? latest.investment / latest.sales : null;
     const ctr = latest.impressions > 0 ? (latest.clicks / latest.impressions) * 100 : 0;
     const cpm = latest.impressions > 0 ? (latest.investment / latest.impressions) * 1000 : 0;
     const frequency = latest.frequency ?? 0;
 
-    // Gasto > R$200 sem vendas
-    if (latest.investment > 200 && latest.sales === 0) {
+    // IMEDIATO: Gasto > limite sem vendas
+    if (latest.investment > thresholds.autoPauseSpendLimit && latest.sales === 0) {
       alerts.push({
         level: "critical",
         campaign: campaign.name,
@@ -46,24 +61,27 @@ router.get("/", async (_req: Request, res: Response) => {
       });
     }
 
-    // CPA > R$70 por 2 períodos consecutivos
-    if (cpa && cpa > 70) {
-      const prevCpa = latestTwo[1]?.sales > 0 ? latestTwo[1].investment / latestTwo[1].sales : null;
-      if (prevCpa && prevCpa > 70) {
+    // CPA > threshold por 3+ períodos consecutivos (Passo 10)
+    if (cpa && cpa > thresholds.cpaPauseThreshold && latestThree.length >= thresholds.minDays) {
+      const allAbove = latestThree.every((m) => {
+        const mCpa = m.sales > 0 ? m.investment / m.sales : 0;
+        return mCpa > thresholds.cpaPauseThreshold && m.sales > 0;
+      });
+      if (allAbove) {
         alerts.push({
           level: "red",
           campaign: campaign.name,
           campaignId: campaign.id,
-          message: `CPA acima de R$70 por 2 períodos consecutivos (R$${cpa.toFixed(2)})`,
-          action: "Matar conjunto. CPA acima do limite por mais de 1 período.",
+          message: `CPA acima de R$${thresholds.cpaPauseThreshold} por ${thresholds.minDays}+ dias consecutivos (R$${cpa.toFixed(2)})`,
+          action: "Matar conjunto. CPA acima do limite sustentado.",
           metric: "CPA",
           value: cpa,
         });
       }
     }
 
-    // CPA entre R$50-70
-    if (cpa && cpa >= 50 && cpa <= 70) {
+    // CPA entre threshold de escala e pausa
+    if (cpa && cpa >= thresholds.autoScaleCPAThreshold && cpa <= thresholds.cpaPauseThreshold) {
       alerts.push({
         level: "yellow",
         campaign: campaign.name,
@@ -75,15 +93,18 @@ router.get("/", async (_req: Request, res: Response) => {
       });
     }
 
-    // CPA < R$50 por 2+ registros → escalar
-    if (cpa && cpa < 50 && latestTwo.length >= 2) {
-      const prevCpa = latestTwo[1]?.sales > 0 ? latestTwo[1].investment / latestTwo[1].sales : null;
-      if (prevCpa && prevCpa < 50) {
+    // CPA < threshold de escala por 3+ períodos → escalar (Passo 10)
+    if (cpa && cpa < thresholds.autoScaleCPAThreshold && latestThree.length >= thresholds.minDays) {
+      const allBelow = latestThree.every((m) => {
+        const mCpa = m.sales > 0 ? m.investment / m.sales : 0;
+        return mCpa > 0 && mCpa < thresholds.autoScaleCPAThreshold && m.sales > 0;
+      });
+      if (allBelow) {
         alerts.push({
           level: "green",
           campaign: campaign.name,
           campaignId: campaign.id,
-          message: `CPA excelente por 2+ períodos: R$${cpa.toFixed(2)}`,
+          message: `CPA excelente por ${thresholds.minDays}+ dias: R$${cpa.toFixed(2)}`,
           action: "Escalar 20-30% o orçamento.",
           metric: "CPA",
           value: cpa,
@@ -105,7 +126,7 @@ router.get("/", async (_req: Request, res: Response) => {
     }
 
     // CTR > 1.5% mas CPA alto
-    if (ctr > 1.5 && cpa && cpa > 70) {
+    if (ctr > 1.5 && cpa && cpa > thresholds.cpaPauseThreshold) {
       alerts.push({
         level: "yellow",
         campaign: campaign.name,
@@ -116,7 +137,7 @@ router.get("/", async (_req: Request, res: Response) => {
       });
     }
 
-    // Frequência > 5
+    // IMEDIATO: Frequência > 5
     if (frequency > 5) {
       alerts.push({
         level: "red",

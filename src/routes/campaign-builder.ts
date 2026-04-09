@@ -387,15 +387,20 @@ router.post("/build", async (req: Request, res: Response) => {
     results.campaign = { id: campaignResult.id, name: campaignName };
     console.log(`[campaign-builder] Campaign created: ${campaignResult.id}`);
 
-    // Save to DB
+    // Save to DB with learning phase (Passo 9)
+    const now = new Date();
+    const learningPhaseEnd = new Date(now.getTime() + 72 * 60 * 60 * 1000);
     const dbCampaign = await prisma.campaign.create({
       data: {
         name: campaignName,
         type: template.type,
         audience: template.description,
         dailyBudget: template.totalBudget / 100,
-        startDate: new Date(),
+        startDate: now,
         status: status === "PAUSED" ? "Pausada" : "Ativa",
+        createdInMetaAt: now,
+        learningPhaseEnd,
+        isInLearningPhase: true,
       },
     });
 

@@ -1,36 +1,8 @@
 import { Router, Request, Response } from "express";
 import prisma from "../prisma";
+import { sendNotification } from "../services/whatsapp-notifier";
 
 const router = Router();
-
-// POST /config — Save notification configuration
-router.post("/config", async (req: Request, res: Response) => {
-  const config = req.body;
-
-  if (!config || typeof config !== "object") {
-    res.status(400).json({ error: "Config JSON obrigatório." });
-    return;
-  }
-
-  // Upsert: if any config exists, update the latest; otherwise create
-  const existing = await prisma.notificationConfig.findFirst({
-    orderBy: { updatedAt: "desc" },
-  });
-
-  let record;
-  if (existing) {
-    record = await prisma.notificationConfig.update({
-      where: { id: existing.id },
-      data: { config },
-    });
-  } else {
-    record = await prisma.notificationConfig.create({
-      data: { config },
-    });
-  }
-
-  res.json(record);
-});
 
 // GET /config — Get current notification config
 router.get("/config", async (_req: Request, res: Response) => {
@@ -39,77 +11,94 @@ router.get("/config", async (_req: Request, res: Response) => {
   });
 
   if (!record) {
-    res.json({ config: null, message: "Nenhuma configuração de notificação encontrada." });
+    res.json({
+      whatsappProvider: "z-api",
+      whatsappInstanceId: null,
+      whatsappToken: null,
+      whatsappPhone: null,
+      enabled: true,
+      notifyAutoActions: true,
+      notifyCreativeActions: true,
+      notifyLearningPhase: true,
+      notifyAlerts: true,
+      notifyDailySummary: true,
+    });
     return;
+  }
+
+  // Never expose the full token to the frontend
+  res.json({
+    ...record,
+    whatsappToken: record.whatsappToken ? "••••••" + record.whatsappToken.slice(-4) : null,
+  });
+});
+
+// PUT /config — Update notification config
+router.put("/config", async (req: Request, res: Response) => {
+  const {
+    whatsappProvider,
+    whatsappInstanceId,
+    whatsappToken,
+    whatsappPhone,
+    enabled,
+    notifyAutoActions,
+    notifyCreativeActions,
+    notifyLearningPhase,
+    notifyAlerts,
+    notifyDailySummary,
+  } = req.body;
+
+  const existing = await prisma.notificationConfig.findFirst({
+    orderBy: { updatedAt: "desc" },
+  });
+
+  const data: any = {};
+  if (whatsappProvider !== undefined) data.whatsappProvider = whatsappProvider;
+  if (whatsappInstanceId !== undefined) data.whatsappInstanceId = whatsappInstanceId;
+  // Only update token if it's a real value (not the masked one)
+  if (whatsappToken !== undefined && !whatsappToken.startsWith("••")) data.whatsappToken = whatsappToken;
+  if (whatsappPhone !== undefined) data.whatsappPhone = whatsappPhone;
+  if (enabled !== undefined) data.enabled = enabled;
+  if (notifyAutoActions !== undefined) data.notifyAutoActions = notifyAutoActions;
+  if (notifyCreativeActions !== undefined) data.notifyCreativeActions = notifyCreativeActions;
+  if (notifyLearningPhase !== undefined) data.notifyLearningPhase = notifyLearningPhase;
+  if (notifyAlerts !== undefined) data.notifyAlerts = notifyAlerts;
+  if (notifyDailySummary !== undefined) data.notifyDailySummary = notifyDailySummary;
+
+  let record;
+  if (existing) {
+    record = await prisma.notificationConfig.update({
+      where: { id: existing.id },
+      data,
+    });
+  } else {
+    record = await prisma.notificationConfig.create({ data });
   }
 
   res.json(record);
 });
 
-// GET /log — List notification logs (last 50)
-router.get("/log", async (_req: Request, res: Response) => {
+// GET /log — Notification history
+router.get("/log", async (req: Request, res: Response) => {
+  const limit = Math.min(parseInt((req.query.limit as string) || "50", 10), 500);
+
   const logs = await prisma.notificationLog.findMany({
-    orderBy: { sentAt: "desc" },
-    take: 50,
+    orderBy: { createdAt: "desc" },
+    take: limit,
   });
 
   res.json(logs);
 });
 
-// Helper function exported for use by scheduler
-export async function sendNotification(rule: string, message: string, data?: any) {
-  const configRecord = await prisma.notificationConfig.findFirst({
-    orderBy: { updatedAt: "desc" },
+// POST /test — Send test notification
+router.post("/test", async (_req: Request, res: Response) => {
+  const success = await sendNotification("test");
+  res.json({
+    success,
+    message: success
+      ? "Mensagem de teste enviada com sucesso!"
+      : "Falha ao enviar mensagem de teste. Verifique as configurações.",
   });
-  if (!configRecord) return;
-
-  const config = configRecord.config as any;
-
-  // Telegram
-  const tg = config.channels?.telegram;
-  if (tg?.enabled && tg?.bot_token && tg?.chat_id) {
-    try {
-      await fetch(`https://api.telegram.org/bot${tg.bot_token}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: tg.chat_id,
-          text: `🚨 TRÁFEGO\n\n${message}`,
-          parse_mode: "Markdown",
-        }),
-      });
-      await prisma.notificationLog.create({
-        data: { rule, message, channel: "telegram", status: "sent" },
-      });
-    } catch {
-      await prisma.notificationLog.create({
-        data: { rule, message, channel: "telegram", status: "failed" },
-      });
-    }
-  }
-
-  // Generic webhook
-  if (config.webhook_url) {
-    try {
-      await fetch(config.webhook_url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rule,
-          message,
-          data,
-          timestamp: new Date().toISOString(),
-        }),
-      });
-      await prisma.notificationLog.create({
-        data: { rule, message, channel: "webhook", status: "sent" },
-      });
-    } catch {
-      await prisma.notificationLog.create({
-        data: { rule, message, channel: "webhook", status: "failed" },
-      });
-    }
-  }
-}
+});
 
 export default router;
