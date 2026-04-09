@@ -64,12 +64,25 @@ router.delete("/:id", async (req: Request, res: Response) => {
 router.get("/overview", async (req: Request, res: Response) => {
   const periodParam = (req.query.period as string) || "7d";
   const compare = req.query.compare as string | undefined;
-
-  const periodDays = periodParam === "30d" ? 30 : periodParam === "14d" ? 14 : 7;
+  const startParam = req.query.start as string | undefined;
+  const endParam = req.query.end as string | undefined;
+  const compareStartParam = req.query.compare_start as string | undefined;
+  const compareEndParam = req.query.compare_end as string | undefined;
 
   const now = new Date();
-  const currentStart = new Date(now);
-  currentStart.setDate(currentStart.getDate() - periodDays);
+  let currentStart: Date;
+  let currentEnd: Date = now;
+
+  if (periodParam === "custom" && startParam && endParam) {
+    currentStart = new Date(startParam);
+    currentEnd = new Date(endParam);
+  } else if (periodParam === "month") {
+    currentStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  } else {
+    const periodDays = periodParam === "30d" ? 30 : periodParam === "14d" ? 14 : 7;
+    currentStart = new Date(now);
+    currentStart.setDate(currentStart.getDate() - periodDays);
+  }
 
   const computeOverview = (metrics: { investment: number; sales: number; clicks: number; impressions: number }[]) => {
     const totalInvestment = metrics.reduce((s, m) => s + m.investment, 0);
@@ -90,16 +103,24 @@ router.get("/overview", async (req: Request, res: Response) => {
   };
 
   const currentMetrics = await prisma.metricEntry.findMany({
-    where: { date: { gte: currentStart, lte: now } },
+    where: { date: { gte: currentStart, lte: currentEnd } },
   });
 
   const current = computeOverview(currentMetrics);
 
-  if (compare === "previous") {
-    const previousEnd = new Date(currentStart);
-    previousEnd.setDate(previousEnd.getDate() - 1);
-    const previousStart = new Date(previousEnd);
-    previousStart.setDate(previousStart.getDate() - periodDays);
+  if (compare === "previous" || compare === "custom") {
+    let previousStart: Date;
+    let previousEnd: Date;
+
+    if (compare === "custom" && compareStartParam && compareEndParam) {
+      previousStart = new Date(compareStartParam);
+      previousEnd = new Date(compareEndParam);
+    } else {
+      // Auto-compute previous period of same length
+      const periodLengthMs = currentEnd.getTime() - currentStart.getTime();
+      previousEnd = new Date(currentStart.getTime() - 1);
+      previousStart = new Date(previousEnd.getTime() - periodLengthMs);
+    }
 
     const previousMetrics = await prisma.metricEntry.findMany({
       where: { date: { gte: previousStart, lte: previousEnd } },
@@ -451,6 +472,42 @@ router.get("/asc-performance", async (_req: Request, res: Response) => {
         const conversions = purchaseAction ? parseInt(purchaseAction.value || "0") : 0;
         const spend = parseFloat(insights.spend || "0");
 
+        // Try to get audience_segment_type breakdown for new vs existing customers
+        let new_customers_percent: number | null = null;
+        let existing_customers_percent: number | null = null;
+        try {
+          const breakdownUrl = new URL(`${META_BASE}/${campaign.id}/insights`);
+          breakdownUrl.searchParams.set("access_token", metaToken);
+          breakdownUrl.searchParams.set("fields", "spend,actions");
+          breakdownUrl.searchParams.set("date_preset", "last_7d");
+          breakdownUrl.searchParams.set("breakdowns", "audience_segment_type");
+
+          const bdResp = await fetch(breakdownUrl.toString());
+          const bdData = (await bdResp.json()) as any;
+          const bdRows: any[] = bdData.data ?? [];
+
+          if (bdRows.length > 0) {
+            let newSpend = 0;
+            let existingSpend = 0;
+            for (const row of bdRows) {
+              const segSpend = parseFloat(row.spend || "0");
+              const segment = (row.audience_segment_type || "").toLowerCase();
+              if (segment.includes("new") || segment === "new_users") {
+                newSpend += segSpend;
+              } else if (segment.includes("existing") || segment === "existing_users") {
+                existingSpend += segSpend;
+              }
+            }
+            const totalSegSpend = newSpend + existingSpend;
+            if (totalSegSpend > 0) {
+              new_customers_percent = parseFloat(((newSpend / totalSegSpend) * 100).toFixed(1));
+              existing_customers_percent = parseFloat(((existingSpend / totalSegSpend) * 100).toFixed(1));
+            }
+          }
+        } catch {
+          // Breakdown not supported for this campaign, keep nulls
+        }
+
         return {
           campaign_id: campaign.id,
           campaign_name: campaign.name,
@@ -465,6 +522,8 @@ router.get("/asc-performance", async (_req: Request, res: Response) => {
           cpa_7d: conversions > 0 ? parseFloat((spend / conversions).toFixed(2)) : null,
           cpm_7d: insights.cpm ? parseFloat(parseFloat(insights.cpm).toFixed(2)) : null,
           ctr_7d: insights.ctr ? parseFloat(parseFloat(insights.ctr).toFixed(2)) : null,
+          new_customers_percent,
+          existing_customers_percent,
         };
       })
     );
