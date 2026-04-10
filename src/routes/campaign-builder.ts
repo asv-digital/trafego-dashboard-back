@@ -559,11 +559,45 @@ router.post("/preview", async (req: Request, res: Response) => {
   }
 });
 
-// POST /launch — Cria campanha completa via template
+// Helper: tenta pausar uma entidade no Meta (para cleanup)
+async function tryPauseMeta(entityId: string): Promise<boolean> {
+  try {
+    await metaPost(entityId, { status: "PAUSED" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// POST /launch — Cria campanha completa via template (com tracking de steps)
 router.post("/launch", async (req: Request, res: Response) => {
   const { ad_account_id, access_token } = getMetaConfig();
+
+  // Log request recebida
+  const requestLog: string[] = [];
+  const log = (msg: string) => {
+    console.log(`[LAUNCH] ${msg}`);
+    requestLog.push(`${new Date().toISOString().slice(11, 19)} ${msg}`);
+  };
+
+  // Tracking detalhado
+  const steps: Array<{ step: string; status: "pending" | "ok" | "error" | "skipped"; message?: string; metaError?: any }> = [];
+  const addStep = (step: string, status: "pending" | "ok" | "error" | "skipped", message?: string, metaError?: any) => {
+    const existing = steps.find(s => s.step === step);
+    if (existing) {
+      existing.status = status;
+      if (message) existing.message = message;
+      if (metaError) existing.metaError = metaError;
+    } else {
+      steps.push({ step, status, message, metaError });
+    }
+  };
+
+  // Resultado parcial (para cleanup em caso de erro)
+  const created = { campaignId: null as string | null, adSetIds: [] as string[], adIds: [] as string[] };
+
   if (!access_token || !ad_account_id) {
-    res.status(400).json({ error: "Meta API nao configurada" });
+    res.status(400).json({ error: "Meta API nao configurada", steps, log: requestLog });
     return;
   }
 
@@ -573,66 +607,146 @@ router.post("/launch", async (req: Request, res: Response) => {
     abVariantCreativeId,
   } = req.body;
 
+  log(`Request: type=${campaignType}, creativeId=${creativeId}, budget=${customBudget}`);
+
   const template = CAMPAIGN_TEMPLATES[campaignType];
   if (!template) {
-    res.status(400).json({ error: `Template "${campaignType}" nao encontrado` });
+    res.status(400).json({ error: `Template "${campaignType}" nao encontrado`, steps, log: requestLog });
     return;
   }
 
   const budgetCentavos = customBudget ? Math.round(customBudget * 100) : template.dailyBudget;
   const budgetReais = budgetCentavos / 100;
 
+  const now = new Date();
+  const finalCampaignName = campaignName || `[${template.key}] ${now.toISOString().slice(0, 10)}`;
+
+  // ── STEP 1: Verificação de budget ──
+  addStep("budget_check", "pending");
   try {
-    // 1. VERIFICAÇÃO DE BUDGET
-    const budgetCheck = await canIncreaseBudget(campaignName || template.label, budgetReais);
+    const budgetCheck = await canIncreaseBudget(finalCampaignName, budgetReais);
     if (!budgetCheck.allowed) {
-      res.status(400).json({ error: `Budget excederia limite. ${budgetCheck.reason}` });
+      addStep("budget_check", "error", `Budget excederia limite: ${budgetCheck.reason}`);
+      log(`Budget check failed: ${budgetCheck.reason}`);
+      res.status(400).json({ error: `Budget excederia limite. ${budgetCheck.reason}`, steps, log: requestLog });
       return;
     }
+    addStep("budget_check", "ok", `Budget R$${budgetReais}/dia OK. Disponivel: R$${budgetCheck.maxIncrease}`);
+    log(`Budget check OK: R$${budgetReais}/dia`);
+  } catch (err) {
+    addStep("budget_check", "error", `Erro ao verificar budget: ${(err as Error).message}`);
+    res.status(500).json({ error: (err as Error).message, steps, log: requestLog });
+    return;
+  }
 
-    let campaignId = existingCampaignId;
-    const results: any = { campaignId: null, adSetIds: [], adIds: [] };
+  // ── STEP 2: Verificação do creativeId ──
+  addStep("creative_validation", "pending");
+  if (!creativeId) {
+    addStep("creative_validation", "error", "creativeId ausente no request");
+    res.status(400).json({ error: "creativeId e obrigatorio", steps, log: requestLog });
+    return;
+  }
+  try {
+    // Valida se o creative existe no Meta
+    const checkUrl = `${META_BASE}/${creativeId}?fields=id,name&access_token=${access_token}`;
+    const checkRes = await fetch(checkUrl);
+    const checkData = (await checkRes.json()) as any;
+    if (checkData.error) {
+      addStep("creative_validation", "error", `Creative nao existe no Meta: ${checkData.error.message}`, checkData.error);
+      log(`Creative invalido: ${checkData.error.message}`);
+      res.status(400).json({ error: `Creative invalido: ${checkData.error.message}`, steps, log: requestLog });
+      return;
+    }
+    addStep("creative_validation", "ok", `Creative ${checkData.name || creativeId} validado`);
+    log(`Creative OK: ${checkData.id}`);
+  } catch (err) {
+    addStep("creative_validation", "error", `Erro ao validar creative: ${(err as Error).message}`);
+    res.status(500).json({ error: (err as Error).message, steps, log: requestLog });
+    return;
+  }
 
-    // 2. CRIAR CAMPANHA (se não usar existente)
+  let campaignId = existingCampaignId;
+
+  // ── STEP 3: Criar campanha ──
+  addStep("create_campaign", "pending");
+  try {
     if (!campaignId) {
       const campResult = await metaPost(`${ad_account_id}/campaigns`, {
-        name: campaignName || `[${template.key}] ${new Date().toISOString().slice(0, 10)}`,
+        name: finalCampaignName,
         objective: template.objective,
         buying_type: template.buyingType,
         special_ad_categories: "[]",
         status: "PAUSED",
       });
       campaignId = campResult.id;
+      created.campaignId = campaignId as string;
+      addStep("create_campaign", "ok", `Campanha criada: ${campaignId}`);
+      log(`Campanha criada: ${campaignId}`);
+    } else {
+      addStep("create_campaign", "skipped", `Usando campanha existente: ${campaignId}`);
+      log(`Usando campanha existente: ${campaignId}`);
     }
-    results.campaignId = campaignId;
+  } catch (err) {
+    const errMsg = (err as Error).message;
+    addStep("create_campaign", "error", errMsg);
+    log(`ERRO ao criar campanha: ${errMsg}`);
+    res.status(500).json({
+      error: `Falha ao criar campanha no Meta. ${errMsg}`,
+      hint: errMsg.includes("permission") ? "Token sem permissao ads_management"
+          : errMsg.includes("payment") || errMsg.includes("billing") ? "Conta sem metodo de pagamento configurado"
+          : errMsg.includes("token") ? "Token expirado ou invalido"
+          : "Verifique as permissoes do token e status da conta",
+      steps, log: requestLog
+    });
+    return;
+  }
 
-    // 3. PREPARAR TARGETING
-    const targeting = { ...template.targeting };
-    if (campaignType === "PROSPECCAO_LAL" && lalAudienceId) {
+  // ── STEP 4: Preparar targeting ──
+  addStep("prepare_targeting", "pending");
+  const targeting = { ...template.targeting };
+  const targetingWarnings: string[] = [];
+  if (campaignType === "PROSPECCAO_LAL") {
+    if (!lalAudienceId) {
+      targetingWarnings.push("PROSPECCAO_LAL sem lalAudienceId - targeting sera broad");
+    } else {
       targeting.custom_audiences = [{ id: lalAudienceId }];
-      const buyersId = process.env.META_BUYERS_AUDIENCE_ID || process.env.META_AUDIENCE_BUYERS_ID;
-      if (buyersId) targeting.excluded_custom_audiences = [{ id: buyersId }];
     }
-    if (campaignType === "REMARKETING") {
-      const abandonersId = process.env.META_AUDIENCE_ABANDONERS_ID;
-      if (abandonersId) targeting.custom_audiences = [{ id: abandonersId }];
-      const buyersId = process.env.META_BUYERS_AUDIENCE_ID || process.env.META_AUDIENCE_BUYERS_ID;
-      if (buyersId) targeting.excluded_custom_audiences = [{ id: buyersId }];
+    const buyersId = process.env.META_BUYERS_AUDIENCE_ID || process.env.META_AUDIENCE_BUYERS_ID;
+    if (buyersId) targeting.excluded_custom_audiences = [{ id: buyersId }];
+    else targetingWarnings.push("META_AUDIENCE_BUYERS_ID nao configurado - compradores nao serao excluidos");
+  }
+  if (campaignType === "REMARKETING") {
+    const abandonersId = process.env.META_AUDIENCE_ABANDONERS_ID;
+    if (abandonersId) {
+      targeting.custom_audiences = [{ id: abandonersId }];
+    } else {
+      addStep("prepare_targeting", "error", "META_AUDIENCE_ABANDONERS_ID nao configurado - impossivel criar remarketing");
+      res.status(400).json({ error: "Remarketing requer META_AUDIENCE_ABANDONERS_ID configurada", steps, log: requestLog });
+      return;
     }
+    const buyersId = process.env.META_BUYERS_AUDIENCE_ID || process.env.META_AUDIENCE_BUYERS_ID;
+    if (buyersId) targeting.excluded_custom_audiences = [{ id: buyersId }];
+    else targetingWarnings.push("Compradores nao serao excluidos do remarketing");
+  }
+  addStep("prepare_targeting", "ok", targetingWarnings.length > 0 ? `Avisos: ${targetingWarnings.join("; ")}` : "Targeting OK");
+  log(`Targeting preparado${targetingWarnings.length ? " com avisos" : ""}`);
 
-    // 4. CRIAR AD SET(S)
-    const adsetCount = campaignType === "TESTE_AB" ? 2 : 1;
-    const creativeIds = campaignType === "TESTE_AB" && abVariantCreativeId
-      ? [creativeId, abVariantCreativeId]
-      : [creativeId];
+  // ── STEP 5: Criar ad set(s) ──
+  const adsetCount = campaignType === "TESTE_AB" ? 2 : 1;
+  const creativeIds = campaignType === "TESTE_AB" && abVariantCreativeId
+    ? [creativeId, abVariantCreativeId]
+    : [creativeId];
 
-    for (let i = 0; i < adsetCount; i++) {
-      const setName = adsetCount > 1
-        ? `${adSetName || "Ad Set"} - Variante ${String.fromCharCode(65 + i)}`
-        : adSetName || "Ad Set";
+  for (let i = 0; i < adsetCount; i++) {
+    const stepKey = `create_adset_${i + 1}`;
+    addStep(stepKey, "pending");
+    const setName = adsetCount > 1
+      ? `${adSetName || "Ad Set"} - Variante ${String.fromCharCode(65 + i)}`
+      : adSetName || "Ad Set";
 
+    try {
       const adsetResult = await metaPost(`${ad_account_id}/adsets`, {
-        campaign_id: campaignId,
+        campaign_id: campaignId!,
         name: setName,
         daily_budget: String(budgetCentavos),
         billing_event: template.billingEvent,
@@ -642,32 +756,117 @@ router.post("/launch", async (req: Request, res: Response) => {
         status: "PAUSED",
         start_time: new Date().toISOString(),
       });
-      results.adSetIds.push(adsetResult.id);
+      created.adSetIds.push(adsetResult.id);
+      addStep(stepKey, "ok", `Ad set criado: ${adsetResult.id} (${setName})`);
+      log(`Ad set ${i + 1} criado: ${adsetResult.id}`);
+    } catch (err) {
+      const errMsg = (err as Error).message;
+      addStep(stepKey, "error", errMsg);
+      log(`ERRO ao criar ad set ${i + 1}: ${errMsg}`);
 
-      // 5. CRIAR AD
-      const adCreativeId = creativeIds[i] || creativeIds[0];
-      const finalAdName = adsetCount > 1
-        ? `${adName || "Ad"} - Variante ${String.fromCharCode(65 + i)}`
-        : adName || "Ad";
+      // Cleanup: pausar a campanha que foi criada
+      if (created.campaignId) {
+        log(`Cleanup: pausando campanha ${created.campaignId}`);
+        await tryPauseMeta(created.campaignId);
+      }
 
+      res.status(500).json({
+        error: `Falha ao criar ad set. ${errMsg}`,
+        hint: errMsg.includes("pixel") ? "Pixel ID invalido ou sem permissao"
+            : errMsg.includes("target") ? "Targeting invalido - verifique audiences e params"
+            : errMsg.includes("budget") ? "Budget invalido ou fora do range permitido"
+            : "Verifique targeting, pixel_id e permissoes",
+        partial_results: created,
+        cleanup: "Campanha criada foi pausada",
+        steps, log: requestLog
+      });
+      return;
+    }
+
+    // ── STEP 6: Criar ad ──
+    const adStepKey = `create_ad_${i + 1}`;
+    addStep(adStepKey, "pending");
+    const adCreativeId = creativeIds[i] || creativeIds[0];
+    const finalAdName = adsetCount > 1
+      ? `${adName || "Ad"} - Variante ${String.fromCharCode(65 + i)}`
+      : adName || "Ad";
+
+    try {
       const adResult = await metaPost(`${ad_account_id}/ads`, {
-        adset_id: adsetResult.id,
+        adset_id: created.adSetIds[i],
         name: finalAdName,
         creative: JSON.stringify({ creative_id: adCreativeId }),
         status: "PAUSED",
       });
-      results.adIds.push(adResult.id);
+      created.adIds.push(adResult.id);
+      addStep(adStepKey, "ok", `Ad criado: ${adResult.id}`);
+      log(`Ad ${i + 1} criado: ${adResult.id}`);
+    } catch (err) {
+      const errMsg = (err as Error).message;
+      addStep(adStepKey, "error", errMsg);
+      log(`ERRO ao criar ad ${i + 1}: ${errMsg}`);
+
+      // Cleanup
+      if (created.campaignId) await tryPauseMeta(created.campaignId);
+
+      res.status(500).json({
+        error: `Falha ao criar ad. ${errMsg}`,
+        hint: errMsg.includes("creative") ? "Creative ID invalido ou incompativel com o ad set"
+            : "Verifique creative_id",
+        partial_results: created,
+        cleanup: "Campanha pausada",
+        steps, log: requestLog
+      });
+      return;
+    }
+  }
+
+  // ── STEP 7: Ativar tudo ──
+  addStep("activate", "pending");
+  const activationErrors: string[] = [];
+  try {
+    await metaPost(campaignId!, { status: "ACTIVE" });
+    log(`Campanha ${campaignId} ativada`);
+    for (const asId of created.adSetIds) {
+      try {
+        await metaPost(asId, { status: "ACTIVE" });
+        log(`Ad set ${asId} ativado`);
+      } catch (err) {
+        activationErrors.push(`Ad set ${asId}: ${(err as Error).message}`);
+      }
+    }
+    for (const adId of created.adIds) {
+      try {
+        await metaPost(adId, { status: "ACTIVE" });
+        log(`Ad ${adId} ativado`);
+      } catch (err) {
+        activationErrors.push(`Ad ${adId}: ${(err as Error).message}`);
+      }
     }
 
-    // 6. ATIVAR TUDO
-    await metaPost(`${campaignId}`, { status: "ACTIVE" });
-    for (const asId of results.adSetIds) await metaPost(`${asId}`, { status: "ACTIVE" });
-    for (const adId of results.adIds) await metaPost(`${adId}`, { status: "ACTIVE" });
+    if (activationErrors.length > 0) {
+      addStep("activate", "error", `Parcial: ${activationErrors.join("; ")}`);
+    } else {
+      addStep("activate", "ok", "Todas entidades ativas");
+    }
+  } catch (err) {
+    const errMsg = (err as Error).message;
+    addStep("activate", "error", errMsg);
+    log(`ERRO na ativacao: ${errMsg}`);
+    // Não faz cleanup aqui — a campanha foi criada, deixa como está
+    res.status(500).json({
+      error: `Campanha criada mas falhou ao ativar. ${errMsg}`,
+      hint: "Entidades foram criadas pausadas no Meta. Ative manualmente no Ads Manager.",
+      partial_results: created,
+      steps, log: requestLog
+    });
+    return;
+  }
 
-    // 7. REGISTRAR NO BANCO
-    const now = new Date();
+  // ── STEP 8: Registrar no banco ──
+  addStep("save_db", "pending");
+  try {
     const learningPhaseEnd = new Date(now.getTime() + 72 * 60 * 60 * 1000);
-    const finalCampaignName = campaignName || `[${template.key}] ${now.toISOString().slice(0, 10)}`;
 
     await prisma.campaign.create({
       data: {
@@ -682,26 +881,34 @@ router.post("/launch", async (req: Request, res: Response) => {
       },
     });
 
-    // Se teste A/B, criar CreativeTest
     if (campaignType === "TESTE_AB" && abVariantCreativeId) {
       await prisma.creativeTest.create({
         data: {
           name: `AB - ${finalCampaignName}`,
           status: "running",
-          adsetId: results.adSetIds[0],
-          variantA: { adId: results.adIds[0], name: "Variante A" },
-          variantB: { adId: results.adIds[1], name: "Variante B" },
+          adsetId: created.adSetIds[0],
+          variantA: { adId: created.adIds[0], name: "Variante A" },
+          variantB: { adId: created.adIds[1], name: "Variante B" },
           startDate: now,
         },
       });
     }
+    addStep("save_db", "ok", "Campanha salva no banco");
+  } catch (err) {
+    addStep("save_db", "error", `Erro ao salvar no banco: ${(err as Error).message} (campanha ativa no Meta)`);
+    log(`ERRO ao salvar no banco: ${(err as Error).message}`);
+    // Não falha totalmente — a campanha está no Meta, só não foi salva no banco
+  }
 
+  // ── STEP 9: Log + Notificação ──
+  addStep("notify", "pending");
+  try {
     await logAction({
       action: "campaign_launched",
       entityType: "campaign",
-      entityId: campaignId,
+      entityId: campaignId!,
       entityName: finalCampaignName,
-      details: `Tipo: ${template.label} | Budget: R$${budgetReais}/dia | ${results.adSetIds.length} ad set(s) | ${results.adIds.length} ad(s)`,
+      details: `Tipo: ${template.label} | Budget: R$${budgetReais}/dia | ${created.adSetIds.length} ad set(s) | ${created.adIds.length} ad(s)`,
       source: "dashboard",
     });
 
@@ -710,11 +917,22 @@ router.post("/launch", async (req: Request, res: Response) => {
       adset: finalCampaignName,
       reason: `Tipo: ${template.label} | Budget: R$${budgetReais * adsetCount}/dia | Lancada e ativa.`,
     });
-
-    res.json({ ...results, status: "active", message: `Campanha lancada: ${finalCampaignName}` });
+    addStep("notify", "ok");
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    addStep("notify", "error", (err as Error).message);
   }
+
+  log(`Launch completo: campanha=${campaignId}, adsets=${created.adSetIds.length}, ads=${created.adIds.length}`);
+
+  res.json({
+    campaignId: created.campaignId,
+    adSetIds: created.adSetIds,
+    adIds: created.adIds,
+    status: "active",
+    message: `Campanha lancada: ${finalCampaignName}`,
+    steps,
+    log: requestLog,
+  });
 });
 
 // GET /audiences — Lista audiências disponíveis
