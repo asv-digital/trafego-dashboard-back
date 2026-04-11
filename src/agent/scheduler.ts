@@ -13,6 +13,7 @@ import { checkCreativeStock } from "../services/creative-stock";
 import { collectAdComments, analyzeComments, generateCommentSummaries } from "../services/comment-analyzer";
 import { checkLookalikeCreation } from "../services/audience-builder";
 import { NET_PER_SALE } from "../config/constants";
+import { nextHourBRT } from "../lib/tz";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -147,14 +148,10 @@ function scheduleNext(): void {
 // ── Daily Summary (8h) ────────────────────────────────────
 
 function scheduleDailySummary(): void {
-  const now = new Date();
-  const next8am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 8, 0, 0, 0);
-  if (now >= next8am) {
-    next8am.setDate(next8am.getDate() + 1);
-  }
-  const msUntil8am = next8am.getTime() - now.getTime();
+  const next8am = nextHourBRT(8);
+  const msUntil8am = next8am.getTime() - Date.now();
 
-  console.log(`[Scheduler] Resumo diário agendado para ${next8am.toISOString()}`);
+  console.log(`[Scheduler] Resumo diário agendado para ${next8am.toISOString()} (8h BRT)`);
 
   dailySummaryTimeout = setTimeout(async () => {
     await sendDailySummary();
@@ -364,12 +361,10 @@ export function startScheduler(): void {
 }
 
 function scheduleCreativeStockCheck(): void {
-  const now = new Date();
-  const next9am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 0, 0, 0);
-  if (now >= next9am) next9am.setDate(next9am.getDate() + 1);
-  const msUntil9am = next9am.getTime() - now.getTime();
+  const next9am = nextHourBRT(9);
+  const msUntil9am = next9am.getTime() - Date.now();
 
-  console.log(`[Scheduler] Verificacao de criativos agendada para ${next9am.toISOString()}`);
+  console.log(`[Scheduler] Verificacao de criativos agendada para ${next9am.toISOString()} (9h BRT)`);
 
   setTimeout(async () => {
     try {
@@ -397,12 +392,10 @@ function scheduleCreativeStockCheck(): void {
 // ── Comment Analysis (Ponto 10) — daily at 7am ────────────
 
 function scheduleCommentAnalysis(): void {
-  const now = new Date();
-  const next7am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 7, 0, 0, 0);
-  if (now >= next7am) next7am.setDate(next7am.getDate() + 1);
-  const msUntil = next7am.getTime() - now.getTime();
+  const next7am = nextHourBRT(7);
+  const msUntil = next7am.getTime() - Date.now();
 
-  console.log(`[Scheduler] Analise de comentarios agendada para ${next7am.toISOString()}`);
+  console.log(`[Scheduler] Analise de comentarios agendada para ${next7am.toISOString()} (7h BRT)`);
 
   setTimeout(async () => {
     try {
@@ -419,12 +412,10 @@ function scheduleCommentAnalysis(): void {
 // ── Lookalike Check (Ponto 11) — daily at 10am ─────────────
 
 function scheduleLookalikeCheck(): void {
-  const now = new Date();
-  const next10am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 10, 0, 0, 0);
-  if (now >= next10am) next10am.setDate(next10am.getDate() + 1);
-  const msUntil = next10am.getTime() - now.getTime();
+  const next10am = nextHourBRT(10);
+  const msUntil = next10am.getTime() - Date.now();
 
-  console.log(`[Scheduler] Verificacao de lookalikes agendada para ${next10am.toISOString()}`);
+  console.log(`[Scheduler] Verificacao de lookalikes agendada para ${next10am.toISOString()} (10h BRT)`);
 
   setTimeout(async () => {
     try {

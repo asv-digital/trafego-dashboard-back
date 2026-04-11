@@ -4,8 +4,19 @@ import { logAction } from "../routes/actions";
 import { canAutomate, acquireLock } from "./automation-coordinator";
 import { canIncreaseBudget, canDecreaseBudget } from "./budget-guard";
 import { NET_PER_SALE } from "../config/constants";
+import { getAccountStatus } from "../lib/meta-account";
 
 const META_BASE = "https://graph.facebook.com/v19.0";
+
+async function alertMetaFailure(op: string, entity: string, detail: string): Promise<void> {
+  try {
+    await sendNotification("alert_critical", {
+      type: "META API FALHOU",
+      detail: `${op} ${entity}: ${detail}`,
+      action: "Verifique Coolify logs do backend.",
+    });
+  } catch { /* não dobra falha */ }
+}
 
 async function updateCampaignBudget(campaignId: string, newBudgetReais: number): Promise<boolean> {
   const metaToken = process.env.META_ACCESS_TOKEN;
@@ -23,11 +34,14 @@ async function updateCampaignBudget(campaignId: string, newBudgetReais: number):
     if (!res.ok) {
       const errBody = await res.text();
       console.error(`[REBALANCE] Erro ao atualizar budget da campanha ${campaignId}: ${errBody}`);
+      await alertMetaFailure("updateCampaignBudget", campaignId, errBody);
       return false;
     }
     return true;
   } catch (err) {
-    console.error(`[REBALANCE] Erro ao atualizar budget da campanha ${campaignId}:`, err);
+    const msg = (err as Error).message;
+    console.error(`[REBALANCE] Erro ao atualizar budget da campanha ${campaignId}:`, msg);
+    await alertMetaFailure("updateCampaignBudget", campaignId, msg);
     return false;
   }
 }
@@ -48,11 +62,14 @@ async function pauseCampaign(campaignId: string): Promise<boolean> {
     if (!res.ok) {
       const errBody = await res.text();
       console.error(`[REBALANCE] Erro ao pausar campanha ${campaignId}: ${errBody}`);
+      await alertMetaFailure("pauseCampaign", campaignId, errBody);
       return false;
     }
     return true;
   } catch (err) {
-    console.error(`[REBALANCE] Erro ao pausar campanha ${campaignId}:`, err);
+    const msg = (err as Error).message;
+    console.error(`[REBALANCE] Erro ao pausar campanha ${campaignId}:`, msg);
+    await alertMetaFailure("pauseCampaign", campaignId, msg);
     return false;
   }
 }
@@ -123,6 +140,13 @@ function computeRecommendations(
 
 export async function executeBudgetRebalance(): Promise<void> {
   console.log("[REBALANCE] Iniciando rebalanceamento de budget...");
+
+  // Pre-flight: não tenta rebalancear se conta não tá ativa.
+  const account = await getAccountStatus();
+  if (!account.active) {
+    console.log(`[REBALANCE] Skipped — ad account ${account.status_key}`);
+    return;
+  }
 
   try {
     const now = new Date();
@@ -243,11 +267,14 @@ async function updateAdsetBudget(adsetId: string, newBudgetReais: number): Promi
     if (!res.ok) {
       const errBody = await res.text();
       console.error(`[REBALANCE-ADSET] Erro ao atualizar budget do adset ${adsetId}: ${errBody}`);
+      await alertMetaFailure("updateAdsetBudget", adsetId, errBody);
       return false;
     }
     return true;
   } catch (err) {
-    console.error(`[REBALANCE-ADSET] Erro ao atualizar budget do adset ${adsetId}:`, err);
+    const msg = (err as Error).message;
+    console.error(`[REBALANCE-ADSET] Erro ao atualizar budget do adset ${adsetId}:`, msg);
+    await alertMetaFailure("updateAdsetBudget", adsetId, msg);
     return false;
   }
 }

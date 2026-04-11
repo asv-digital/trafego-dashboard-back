@@ -73,14 +73,16 @@ const prisma = new PrismaClient({ adapter });
 
 // ── Helpers ──────────────────────────────────────────────────
 
+// Datas para insights do Meta devem estar no fuso da conta (BRT para Brasil).
+// UTC faz a madrugada "pular dia" e perde dados entre 21h-23h59.
+import { dateStringBRT } from "../lib/tz";
+
 function today(): string {
-  return new Date().toISOString().split("T")[0];
+  return dateStringBRT(new Date());
 }
 
 function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().split("T")[0];
+  return dateStringBRT(new Date(Date.now() - n * 24 * 60 * 60 * 1000));
 }
 
 function isConfigured(): boolean {

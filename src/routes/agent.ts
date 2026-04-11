@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { getStatus, runNow } from "../agent/scheduler";
 import { PRODUCT_PRICE, GATEWAY_FEE, NET_PER_SALE } from "../config/constants";
 import prisma from "../prisma";
+import { getAccountStatus } from "../lib/meta-account";
 
 const router = Router();
 
@@ -23,12 +24,26 @@ router.post("/run", async (_req: Request, res: Response) => {
 });
 
 // GET /api/agent/config — business config (no sensitive tokens)
-router.get("/config", (_req: Request, res: Response) => {
+router.get("/config", async (_req: Request, res: Response) => {
   const metaToken = process.env.META_ACCESS_TOKEN || "";
   const metaAccount = process.env.META_AD_ACCOUNT_ID || "";
   const metaPixel = process.env.META_PIXEL_ID || "";
   const metaPage = process.env.META_PAGE_ID || "";
   const kirvanoKey = process.env.KIRVANO_WEBHOOK_TOKEN || "";
+
+  // Verificação canônica do Meta: conta tem que estar ACTIVE (status 1 ou 9).
+  // NUNCA inferir liberação a partir de budget ou campanhas configuradas.
+  const envOk = metaToken !== "" && metaAccount !== "" && metaPixel !== "" && metaPage !== "";
+  const accountStatus = envOk ? await getAccountStatus() : null;
+
+  const blockers: string[] = [];
+  if (metaToken === "") blockers.push("META_ACCESS_TOKEN ausente");
+  if (metaAccount === "") blockers.push("META_AD_ACCOUNT_ID ausente");
+  if (metaPixel === "") blockers.push("META_PIXEL_ID ausente");
+  if (metaPage === "") blockers.push("META_PAGE_ID ausente");
+  if (accountStatus && !accountStatus.active) {
+    blockers.push(`ad account ${accountStatus.status_key}: ${accountStatus.message}`);
+  }
 
   res.json({
     business: {
@@ -47,7 +62,9 @@ router.get("/config", (_req: Request, res: Response) => {
       configured: metaToken !== "" && metaAccount !== "",
       has_pixel: metaPixel !== "",
       has_page: metaPage !== "",
-      launch_ready: metaToken !== "" && metaAccount !== "" && metaPixel !== "" && metaPage !== "",
+      account_status: accountStatus,
+      launch_ready: blockers.length === 0,
+      blockers,
     },
     kirvano: {
       configured: kirvanoKey !== "",

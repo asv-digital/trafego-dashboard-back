@@ -8,6 +8,7 @@ import { distributeCreative } from "../services/creative-distributor";
 import { sendNotification } from "../services/whatsapp-notifier";
 import { canIncreaseBudget, getCurrentAllocation } from "../services/budget-guard";
 import { CAMPAIGN_TEMPLATES } from "../config/campaign-templates";
+import { ensureAccountActive } from "../lib/meta-account";
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 500 * 1024 * 1024 } });
 
@@ -322,6 +323,13 @@ router.post("/build", async (req: Request, res: Response) => {
   const results: any = { campaign: null, adsets: [], ads: [], errors: [] };
 
   try {
+    // Pre-flight: ad account precisa estar ativo.
+    const gate = await ensureAccountActive();
+    if (!gate.allowed) {
+      res.status(412).json({ error: gate.reason, account_status: gate.status });
+      return;
+    }
+
     // 1. Create Campaign
     console.log(`[campaign-builder] Creating campaign: ${campaignName}`);
     const campaignResult = await metaPost(`${ad_account_id}/campaigns`, {
@@ -621,6 +629,29 @@ router.post("/launch", async (req: Request, res: Response) => {
 
   const now = new Date();
   const finalCampaignName = campaignName || `[${template.key}] ${now.toISOString().slice(0, 10)}`;
+
+  // ── STEP 0 (gate): Ad account ativo? ──
+  // Verificação canônica via Meta Graph API — nunca inferir de budget/spend.
+  addStep("account_status", "pending");
+  try {
+    const gate = await ensureAccountActive();
+    if (!gate.allowed) {
+      addStep("account_status", "error", gate.reason || "conta não ativa");
+      log(`Ad account bloqueado: ${gate.reason}`);
+      res.status(412).json({
+        error: gate.reason,
+        hint: "Resolva o bloqueio no Meta Business Settings antes de lançar.",
+        account_status: gate.status,
+        steps, log: requestLog,
+      });
+      return;
+    }
+    addStep("account_status", "ok", `${gate.status?.status_key} (${gate.status?.name})`);
+  } catch (err) {
+    addStep("account_status", "error", `Falha na checagem: ${(err as Error).message}`);
+    res.status(500).json({ error: (err as Error).message, steps, log: requestLog });
+    return;
+  }
 
   // ── STEP 1: Verificação de budget ──
   addStep("budget_check", "pending");

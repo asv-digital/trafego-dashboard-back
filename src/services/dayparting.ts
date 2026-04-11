@@ -2,6 +2,8 @@ import prisma from "../prisma";
 import { sendNotification } from "./whatsapp-notifier";
 import { logAction } from "../routes/actions";
 import { canAutomate, acquireLock } from "./automation-coordinator";
+import { currentHourBRT, hourBRTFromDate } from "../lib/tz";
+import { getAccountStatus } from "../lib/meta-account";
 
 const META_BASE = "https://graph.facebook.com/v19.0";
 
@@ -128,6 +130,13 @@ function identifyWindows(hours: HourBucket[]): { highWindows: number[]; lowWindo
 export async function applyDaypartingRules(): Promise<void> {
   console.log("[DAYPART] Verificando regras de dayparting...");
 
+  // Pre-flight: conta ativa?
+  const account = await getAccountStatus();
+  if (!account.active) {
+    console.log(`[DAYPART] Skipped — ad account ${account.status_key}`);
+    return;
+  }
+
   try {
     // 1. Get hourly sales distribution from last 14 days
     const fourteenDaysAgo = new Date();
@@ -146,17 +155,17 @@ export async function applyDaypartingRules(): Promise<void> {
       return;
     }
 
-    // Build hourly distribution
+    // Build hourly distribution — horas em BRT (não UTC nem local do servidor).
     const hours: HourBucket[] = Array.from({ length: 24 }, (_, i) => ({ hour: i, count: 0, revenue: 0 }));
     for (const sale of sales) {
-      const h = sale.date.getHours();
+      const h = hourBRTFromDate(sale.date);
       hours[h].count++;
       hours[h].revenue += sale.amountNet;
     }
 
     // 2. Identify high/low performance windows
     const { highWindows, lowWindows } = identifyWindows(hours);
-    const currentHour = new Date().getHours();
+    const currentHour = currentHourBRT();
 
     // 3. Get active ABO adsets
     const adsets = await getActiveABOAdsets();

@@ -50,13 +50,15 @@ function extractUtm(payload: any) {
   };
 }
 
-function extractTxId(payload: any): string {
+function extractTxId(payload: any): string | null {
+  // Nunca gerar UUID random — quebra idempotência e permite duplicar vendas.
+  // Se Kirvano não mandar nenhum ID, rejeitamos o webhook.
   return (
     payload.transaction_id ||
     payload.sale_id ||
     payload.kirvano_tx_id ||
     payload.id ||
-    crypto.randomUUID()
+    null
   );
 }
 
@@ -382,6 +384,9 @@ async function incrementDailyMetrics(
 
 async function createSale(payload: any, status: string) {
   const txId = extractTxId(payload);
+  if (!txId) {
+    throw new Error("webhook sem transaction_id/sale_id/id — rejeitado por idempotência");
+  }
   const customer = extractCustomer(payload);
   const utm = extractUtm(payload);
   const metaIds = extractMetaIds(payload);
@@ -494,6 +499,10 @@ async function handleApproved(payload: any, res: Response) {
 
 async function handleRefunded(payload: any, res: Response) {
   const txId = extractTxId(payload);
+  if (!txId) {
+    res.status(400).json({ error: "webhook sem transaction_id" });
+    return;
+  }
   const sale = await prisma.sale.findUnique({ where: { kirvanoTxId: txId } });
 
   if (!sale) {
@@ -513,6 +522,10 @@ async function handleRefunded(payload: any, res: Response) {
 
 async function handleChargeback(payload: any, res: Response) {
   const txId = extractTxId(payload);
+  if (!txId) {
+    res.status(400).json({ error: "webhook sem transaction_id" });
+    return;
+  }
   const sale = await prisma.sale.findUnique({ where: { kirvanoTxId: txId } });
 
   if (!sale) {
@@ -582,6 +595,10 @@ async function handlePendingPayment(payload: any, status: string, res: Response)
 
 async function handleExpired(payload: any, res: Response) {
   const txId = extractTxId(payload);
+  if (!txId) {
+    res.status(400).json({ error: "webhook sem transaction_id" });
+    return;
+  }
   const sale = await prisma.sale.findUnique({ where: { kirvanoTxId: txId } });
 
   if (!sale) {

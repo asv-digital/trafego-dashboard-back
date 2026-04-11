@@ -4,6 +4,7 @@ import { logAction } from "../routes/actions";
 import { NET_PER_SALE } from "../config/constants";
 import { canAutomate, acquireLock } from "./automation-coordinator";
 import { canIncreaseBudget, getCurrentAllocation } from "./budget-guard";
+import { getAccountStatus } from "../lib/meta-account";
 
 const META_BASE = "https://graph.facebook.com/v19.0";
 
@@ -315,12 +316,35 @@ async function getActiveAdsetMetrics(): Promise<AdsetWithMetrics[]> {
 
     return result;
   } catch (err) {
-    console.error("[AUTO] Erro ao buscar métricas de adsets:", err);
+    const msg = (err as Error).message;
+    console.error("[AUTO] Erro ao buscar métricas de adsets:", msg);
+    // Fail loud: avisa no WhatsApp. Agente sem dados = perigoso.
+    try {
+      await sendNotification("alert_critical", {
+        type: "COLETA META FALHOU",
+        detail: `getActiveAdsetMetrics erro: ${msg}`,
+        action: "Verificar token Meta, rate limit ou billing da conta.",
+      });
+    } catch { /* não dobrar falha */ }
     return [];
   }
 }
 
 export async function executeAutomations(): Promise<void> {
+  // Pre-flight: conta Meta tem que estar viva antes de tocar em adsets.
+  const account = await getAccountStatus();
+  if (!account.active) {
+    console.log(`[AUTO] Skipped — ad account ${account.status_key}: ${account.message}`);
+    try {
+      await sendNotification("alert_critical", {
+        type: "AGENTE SKIPADO",
+        detail: `Ad account não-ativo: ${account.status_key}. ${account.message}`,
+        action: "Resolva no Meta Business Settings e o agente volta automaticamente.",
+      });
+    } catch { /* swallow */ }
+    return;
+  }
+
   const config = await getAutomationConfig();
   const adsets = await getActiveAdsetMetrics();
 

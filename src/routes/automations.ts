@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import prisma from "../prisma";
 import { NET_PER_SALE } from "../config/constants";
 import { getCurrentAllocation } from "../services/budget-guard";
+import { getAccountStatus } from "../lib/meta-account";
 
 const router = Router();
 
@@ -66,6 +67,7 @@ router.get("/budget-allocation", async (_req: Request, res: Response) => {
   try {
     const allocation = await getCurrentAllocation();
     const config = await prisma.automationConfig.findFirst({ orderBy: { updatedAt: "desc" } });
+    const accountStatus = await getAccountStatus();
 
     const dailyTarget = parseFloat(process.env.DAILY_BUDGET_TARGET || "500");
 
@@ -81,10 +83,13 @@ router.get("/budget-allocation", async (_req: Request, res: Response) => {
         remarketing: config?.budgetFloorRemarketing ?? 100,
       },
       daily_target: dailyTarget,
+      // Billing é verdade canônica — budget configurado ≠ budget entregando.
+      account_status: accountStatus,
+      delivering: accountStatus.active,
     });
   } catch (err: unknown) {
     console.error("[automations] Error:", (err as Error).message);
-    res.json({ allocation: { prospection: 0, remarketing: 0, asc: 0, total: 0, reserve: 0 }, caps: {}, floors: {}, daily_target: 500 });
+    res.status(500).json({ error: (err as Error).message });
   }
 });
 

@@ -25,6 +25,7 @@ import audiencesRoutes from "./routes/audiences";
 import reportsRoutes from "./routes/reports";
 import adminRoutes from "./routes/admin";
 import { startScheduler } from "./agent/scheduler";
+import { getAccountStatus } from "./lib/meta-account";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -91,11 +92,26 @@ app.get("/api/health", async (_req, res) => {
     token_expires_in_days: tokenDaysRemaining,
   };
 
+  // Meta ad account billing/status — canonical via Graph API (cached 60s)
+  try {
+    const accountStatus = await getAccountStatus();
+    components.meta_account = {
+      status: accountStatus.active ? "ok" : "critical",
+      status_key: accountStatus.status_key,
+      message: accountStatus.message,
+      name: accountStatus.name,
+    };
+  } catch (err) {
+    components.meta_account = { status: "error", error: (err as Error).message };
+  }
+
   // Agent check
   components.agent = { status: "ok" };
 
-  // Kirvano webhook
-  components.kirvano_webhook = { status: "ok" };
+  // Kirvano webhook — checa se env tá configurado (verdade canônica: o endpoint valida token)
+  components.kirvano_webhook = {
+    status: process.env.KIRVANO_WEBHOOK_TOKEN ? "ok" : "not_configured",
+  };
 
   const overallStatus = Object.values(components).some((c: any) => c.status === "error")
     ? "critical"
