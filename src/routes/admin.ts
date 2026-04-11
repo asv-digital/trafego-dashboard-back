@@ -114,6 +114,36 @@ router.get("/meta-account-info", async (req: Request, res: Response) => {
     out.me_error = (err as Error).message;
   }
 
+  try {
+    const r4 = await fetch(`${base}/me/accounts?fields=id,name,category,access_token&limit=100&access_token=${encodeURIComponent(token)}`);
+    const raw = await r4.json();
+    // Redact per-page access tokens before returning.
+    if (raw.data && Array.isArray(raw.data)) {
+      out.pages = raw.data.map((p: any) => ({
+        id: p.id,
+        name: p.name,
+        category: p.category,
+        has_access_token: !!p.access_token,
+      }));
+    } else {
+      out.pages = raw;
+    }
+  } catch (err) {
+    out.pages_error = (err as Error).message;
+  }
+
+  // Também lista pages acessíveis via ad account (include Business Manager sharing)
+  try {
+    const r5 = await fetch(`${base}/${account}/promote_pages?fields=id,name&access_token=${encodeURIComponent(token)}`);
+    out.ad_account_pages = await r5.json();
+  } catch (err) {
+    out.ad_account_pages_error = (err as Error).message;
+  }
+
+  // Também revela o valor configurado de META_PAGE_ID pra facilitar diagnóstico
+  out.configured_page_id = process.env.META_PAGE_ID || null;
+  out.configured_page_id_length = (process.env.META_PAGE_ID || "").length;
+
   return res.json(out);
 });
 
