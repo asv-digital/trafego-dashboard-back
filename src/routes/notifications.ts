@@ -4,6 +4,13 @@ import { sendNotification } from "../services/whatsapp-notifier";
 
 const router = Router();
 
+// Mascara o token antes de devolver pra API — qualquer endpoint (GET ou PUT)
+// DEVE passar por aqui. Valor cru do token JAMAIS deve sair do backend.
+function maskToken(token: string | null): string | null {
+  if (!token) return null;
+  return "••••••" + token.slice(-4);
+}
+
 // GET /config — Get current notification config
 router.get("/config", async (_req: Request, res: Response) => {
   const record = await prisma.notificationConfig.findFirst({
@@ -29,7 +36,7 @@ router.get("/config", async (_req: Request, res: Response) => {
   // Never expose the full token to the frontend
   res.json({
     ...record,
-    whatsappToken: record.whatsappToken ? "••••••" + record.whatsappToken.slice(-4) : null,
+    whatsappToken: maskToken(record.whatsappToken),
   });
 });
 
@@ -75,7 +82,11 @@ router.put("/config", async (req: Request, res: Response) => {
     record = await prisma.notificationConfig.create({ data });
   }
 
-  res.json(record);
+  // Nunca retornar o token cru — mesmo em PUT. Frontend só recebe mascarado.
+  res.json({
+    ...record,
+    whatsappToken: maskToken(record.whatsappToken),
+  });
 });
 
 // GET /log — Notification history
