@@ -76,4 +76,45 @@ router.post("/reset-test-data", async (req: Request, res: Response) => {
   });
 });
 
+router.get("/meta-account-info", async (req: Request, res: Response) => {
+  if (!process.env.ADMIN_RESET_TOKEN) {
+    return res.status(503).json({ error: "ADMIN_RESET_TOKEN not configured on server" });
+  }
+  if (!authorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const token = process.env.META_ACCESS_TOKEN || "";
+  const account = process.env.META_AD_ACCOUNT_ID || "";
+  if (!token || !account) {
+    return res.status(400).json({ error: "META_ACCESS_TOKEN or META_AD_ACCOUNT_ID missing" });
+  }
+
+  const base = "https://graph.facebook.com/v19.0";
+  const out: any = { ad_account_id: account };
+
+  try {
+    const r1 = await fetch(`${base}/${account}?fields=id,name,business,owner,account_status,currency&access_token=${encodeURIComponent(token)}`);
+    out.account = await r1.json();
+  } catch (err) {
+    out.account_error = (err as Error).message;
+  }
+
+  try {
+    const r2 = await fetch(`${base}/${account}/adspixels?fields=id,name,code&access_token=${encodeURIComponent(token)}`);
+    out.pixels = await r2.json();
+  } catch (err) {
+    out.pixels_error = (err as Error).message;
+  }
+
+  try {
+    const r3 = await fetch(`${base}/me?fields=id,name&access_token=${encodeURIComponent(token)}`);
+    out.me = await r3.json();
+  } catch (err) {
+    out.me_error = (err as Error).message;
+  }
+
+  return res.json(out);
+});
+
 export default router;
