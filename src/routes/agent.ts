@@ -26,7 +26,7 @@ router.post("/run", async (_req: Request, res: Response) => {
 router.get("/config", (_req: Request, res: Response) => {
   const metaToken = process.env.META_ACCESS_TOKEN || "";
   const metaAccount = process.env.META_AD_ACCOUNT_ID || "";
-  const kirvanoKey = process.env.KIRVANO_API_KEY || "";
+  const kirvanoKey = process.env.KIRVANO_WEBHOOK_TOKEN || "";
 
   res.json({
     business: {
@@ -245,17 +245,12 @@ router.get("/event-match-quality", async (_req: Request, res: Response) => {
   } catch (err) {
     // Fallback: estimate based on recent CAPI sales from DB
     try {
-      const { PrismaClient } = await import("@prisma/client");
-      const prisma = new PrismaClient();
-
       const sevenDaysAgo = new Date();
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
       const recentSales = await prisma.sale.findMany({
         where: { date: { gte: sevenDaysAgo } },
       });
-
-      await prisma.$disconnect();
 
       const total = recentSales.length;
       if (total === 0) {
@@ -269,8 +264,8 @@ router.get("/event-match-quality", async (_req: Request, res: Response) => {
         return;
       }
 
-      const withEmail = recentSales.filter((s: any) => s.email && s.email.trim() !== "").length;
-      const withPhone = recentSales.filter((s: any) => s.phone && s.phone.trim() !== "").length;
+      const withEmail = recentSales.filter((s) => s.customerEmail && s.customerEmail.trim() !== "").length;
+      const withPhone = recentSales.filter((s) => s.customerPhone && s.customerPhone.trim() !== "").length;
 
       const emailRate = withEmail / total;
       const phoneRate = withPhone / total;

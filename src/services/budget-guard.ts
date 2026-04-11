@@ -28,6 +28,15 @@ export async function getActiveAdsetBudgets(): Promise<Array<{ id: string; name:
   const metaAccountId = process.env.META_AD_ACCOUNT_ID;
   if (!metaToken || !metaAccountId) return [];
 
+  // Whitelist: só considera campanhas gerenciadas pelo Campaign Builder.
+  const trackedCampaigns = await prisma.campaign.findMany({
+    where: { metaCampaignId: { not: null } },
+    select: { metaCampaignId: true, name: true },
+  });
+  if (trackedCampaigns.length === 0) return [];
+  const trackedIds = new Set(trackedCampaigns.map(c => c.metaCampaignId!));
+  const trackedNameById = new Map(trackedCampaigns.map(c => [c.metaCampaignId!, c.name]));
+
   try {
     const url = new URL(`${META_BASE}/${metaAccountId}/adsets`);
     url.searchParams.set("access_token", metaToken);
@@ -37,21 +46,12 @@ export async function getActiveAdsetBudgets(): Promise<Array<{ id: string; name:
     const res = await fetch(url.toString());
     if (!res.ok) return [];
     const json = (await res.json()) as any;
-    const adsets = json.data ?? [];
-
-    // Get campaign names
-    const campaignsUrl = new URL(`${META_BASE}/${metaAccountId}/campaigns`);
-    campaignsUrl.searchParams.set("access_token", metaToken);
-    campaignsUrl.searchParams.set("fields", "id,name");
-    campaignsUrl.searchParams.set("limit", "200");
-    const campRes = await fetch(campaignsUrl.toString());
-    const campJson = (await campRes.json()) as any;
-    const campaignMap = new Map((campJson.data ?? []).map((c: any) => [c.id, c.name]));
+    const adsets = (json.data ?? []).filter((a: any) => trackedIds.has(a.campaign_id));
 
     return adsets.map((a: any) => ({
       id: a.id,
       name: a.name || "",
-      campaignName: campaignMap.get(a.campaign_id) || "",
+      campaignName: trackedNameById.get(a.campaign_id) || "",
       dailyBudget: a.daily_budget ? parseFloat(a.daily_budget) / 100 : 0,
     }));
   } catch {

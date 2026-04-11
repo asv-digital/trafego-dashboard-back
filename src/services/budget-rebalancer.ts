@@ -70,6 +70,7 @@ function computeRecommendations(
   campaigns: Array<{
     id: string;
     name: string;
+    metaCampaignId: string | null;
     dailyBudget: number;
     metrics: Array<{ investment: number; sales: number }>;
   }>
@@ -78,6 +79,7 @@ function computeRecommendations(
 
   for (const campaign of campaigns) {
     if (campaign.metrics.length === 0) continue;
+    if (!campaign.metaCampaignId) continue;
 
     const totalSpend = campaign.metrics.reduce((s, m) => s + m.investment, 0);
     const totalSales = campaign.metrics.reduce((s, m) => s + m.sales, 0);
@@ -107,7 +109,7 @@ function computeRecommendations(
     }
 
     results.push({
-      campaignId: campaign.id,
+      campaignId: campaign.metaCampaignId,
       campaignName: campaign.name,
       currentBudget: dailyBudget,
       suggestedBudget,
@@ -257,7 +259,7 @@ interface AdsetWithMetrics7d {
   metrics7d: { spend: number; sales: number; cpa: number };
 }
 
-async function getActiveAdsetsWithMetrics(campaignName: string): Promise<AdsetWithMetrics7d[]> {
+async function getActiveAdsetsWithMetrics(metaCampaignId: string): Promise<AdsetWithMetrics7d[]> {
   const metaToken = process.env.META_ACCESS_TOKEN;
   const metaAccountId = process.env.META_AD_ACCOUNT_ID;
   if (!metaToken || !metaAccountId) return [];
@@ -269,13 +271,12 @@ async function getActiveAdsetsWithMetrics(campaignName: string): Promise<AdsetWi
     const since = sevenDaysAgo.toISOString().split("T")[0];
     const until = now.toISOString().split("T")[0];
 
-    const url = new URL(`${META_BASE}/${metaAccountId}/insights`);
+    const url = new URL(`${META_BASE}/${metaCampaignId}/insights`);
     url.searchParams.set("access_token", metaToken);
     url.searchParams.set("fields", "adset_id,adset_name,spend,actions");
     url.searchParams.set("level", "adset");
     url.searchParams.set("time_range", JSON.stringify({ since, until }));
     url.searchParams.set("time_increment", "all_days");
-    url.searchParams.set("filtering", JSON.stringify([{ field: "campaign.name", operator: "CONTAIN", value: campaignName }]));
     url.searchParams.set("limit", "200");
 
     const res = await fetch(url.toString());
@@ -326,14 +327,17 @@ async function getActiveAdsetsWithMetrics(campaignName: string): Promise<AdsetWi
   }
 }
 
-async function rebalanceWithinCampaign(campaign: { id: string; name: string; isInLearningPhase: boolean }): Promise<void> {
+async function rebalanceWithinCampaign(campaign: { id: string; name: string; metaCampaignId: string | null; isInLearningPhase: boolean }): Promise<void> {
   // Ignorar campanhas em learning phase
   if (campaign.isInLearningPhase) return;
+
+  // Ignorar campanhas sem metaCampaignId (não foram criadas pelo agente)
+  if (!campaign.metaCampaignId) return;
 
   // Ignorar campanhas ASC (Meta gerencia internamente)
   if (campaign.name.toUpperCase().includes("ASC") || campaign.name.toUpperCase().includes("ADVANTAGE")) return;
 
-  const adsets = await getActiveAdsetsWithMetrics(campaign.name);
+  const adsets = await getActiveAdsetsWithMetrics(campaign.metaCampaignId);
 
   // Precisa de pelo menos 2 ad sets ativos com dados de vendas
   const withData = adsets.filter(a => a.metrics7d.spend > 0 && a.metrics7d.sales > 0);

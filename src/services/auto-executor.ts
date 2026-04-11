@@ -193,6 +193,15 @@ async function getActiveAdsetMetrics(): Promise<AdsetWithMetrics[]> {
   const metaAccountId = process.env.META_AD_ACCOUNT_ID;
   if (!metaToken || !metaAccountId) return [];
 
+  // Whitelist: só considera campanhas registradas pelo Campaign Builder.
+  // Protege contas Meta compartilhadas com outros produtos — o agente nunca
+  // toca em adsets de campanhas que ele mesmo não criou.
+  const trackedCampaigns = await prisma.campaign.findMany({
+    where: { metaCampaignId: { not: null } },
+  });
+  if (trackedCampaigns.length === 0) return [];
+  const trackedByMetaId = new Map(trackedCampaigns.map(c => [c.metaCampaignId!, c]));
+
   try {
     // Get adset-level insights for last 7 days, broken by day
     const now = new Date();
@@ -216,7 +225,7 @@ async function getActiveAdsetMetrics(): Promise<AdsetWithMetrics[]> {
     const json = (await res.json()) as any;
     const rows: any[] = json.data ?? [];
 
-    // Group by adset
+    // Group by adset — skip rows whose campaign is not tracked.
     const adsetMap = new Map<string, {
       name: string;
       campaignId: string;
@@ -225,11 +234,14 @@ async function getActiveAdsetMetrics(): Promise<AdsetWithMetrics[]> {
     }>();
 
     for (const row of rows) {
+      const campaignId = row.campaign_id || "";
+      if (!trackedByMetaId.has(campaignId)) continue;
+
       const adsetId = row.adset_id;
       if (!adsetMap.has(adsetId)) {
         adsetMap.set(adsetId, {
           name: row.adset_name || "",
-          campaignId: row.campaign_id || "",
+          campaignId,
           campaignName: row.campaign_name || "",
           dailyMetrics: [],
         });
@@ -251,17 +263,12 @@ async function getActiveAdsetMetrics(): Promise<AdsetWithMetrics[]> {
       });
     }
 
-    // Fetch campaigns from DB for learning phase info
-    const campaignIds = [...new Set([...adsetMap.values()].map(a => a.campaignId))];
-    const dbCampaigns = await prisma.campaign.findMany({
-      where: { name: { in: [...new Set([...adsetMap.values()].map(a => a.campaignName))] } },
-    });
-    const campaignByName = new Map(dbCampaigns.map(c => [c.name, c]));
+    if (adsetMap.size === 0) return [];
 
-    // Fetch adset budgets from Meta
+    // Fetch adset budgets from Meta (filtered by tracked campaigns)
     const adsetsUrl = new URL(`${META_BASE}/${metaAccountId}/adsets`);
     adsetsUrl.searchParams.set("access_token", metaToken);
-    adsetsUrl.searchParams.set("fields", "id,daily_budget,effective_status");
+    adsetsUrl.searchParams.set("fields", "id,daily_budget,effective_status,campaign_id");
     adsetsUrl.searchParams.set("filtering", JSON.stringify([{ field: "effective_status", operator: "IN", value: ["ACTIVE"] }]));
     adsetsUrl.searchParams.set("limit", "200");
 
@@ -269,13 +276,14 @@ async function getActiveAdsetMetrics(): Promise<AdsetWithMetrics[]> {
     const adsetsJson = (await adsetsRes.json()) as any;
     const adsetBudgets = new Map<string, number>();
     for (const adset of adsetsJson.data ?? []) {
+      if (!trackedByMetaId.has(adset.campaign_id || "")) continue;
       adsetBudgets.set(adset.id, adset.daily_budget ? parseFloat(adset.daily_budget) / 100 : 0);
     }
 
     const result: AdsetWithMetrics[] = [];
 
     for (const [adsetId, data] of adsetMap) {
-      const dbCampaign = campaignByName.get(data.campaignName);
+      const dbCampaign = trackedByMetaId.get(data.campaignId);
       const isInLearningPhase = dbCampaign?.isInLearningPhase ?? false;
       const isASC = data.campaignName.toUpperCase().includes("ASC") || data.campaignName.toUpperCase().includes("ADVANTAGE");
 

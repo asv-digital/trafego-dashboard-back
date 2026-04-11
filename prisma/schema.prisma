@@ -14,6 +14,10 @@ model Campaign {
   dailyBudget       Float
   startDate         DateTime
   status            String    @default("Ativa")
+  // ID da campanha no Meta — preenchido pelo Campaign Builder no launch.
+  // Usado como whitelist para auto-executor e budget-guard filtrarem apenas
+  // as campanhas gerenciadas pelo agente (multi-produto na mesma conta).
+  metaCampaignId    String?   @unique
   // Fase de aprendizado (Passo 9)
   createdInMetaAt   DateTime?
   learningPhaseEnd  DateTime?
