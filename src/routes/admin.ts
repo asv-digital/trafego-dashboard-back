@@ -116,9 +116,9 @@ router.get("/meta-account-info", async (req: Request, res: Response) => {
 
   try {
     const r4 = await fetch(`${base}/me/accounts?fields=id,name,category,access_token&limit=100&access_token=${encodeURIComponent(token)}`);
-    const raw = await r4.json();
+    const raw = (await r4.json()) as any;
     // Redact per-page access tokens before returning.
-    if (raw.data && Array.isArray(raw.data)) {
+    if (raw?.data && Array.isArray(raw.data)) {
       out.pages = raw.data.map((p: any) => ({
         id: p.id,
         name: p.name,
