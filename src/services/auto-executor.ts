@@ -5,6 +5,7 @@ import { NET_PER_SALE } from "../config/constants";
 import { canAutomate, acquireLock } from "./automation-coordinator";
 import { canIncreaseBudget, getCurrentAllocation } from "./budget-guard";
 import { getAccountStatus } from "../lib/meta-account";
+import { shouldSendStateAlert, resetStateAlert } from "../lib/alert-dedup";
 
 const META_BASE = "https://graph.facebook.com/v19.0";
 
@@ -335,15 +336,23 @@ export async function executeAutomations(): Promise<void> {
   const account = await getAccountStatus();
   if (!account.active) {
     console.log(`[AUTO] Skipped — ad account ${account.status_key}: ${account.message}`);
-    try {
-      await sendNotification("alert_critical", {
-        type: "AGENTE SKIPADO",
-        detail: `Ad account não-ativo: ${account.status_key}. ${account.message}`,
-        action: "Resolva no Meta Business Settings e o agente volta automaticamente.",
-      });
-    } catch { /* swallow */ }
+    // Edge-triggered: só alerta na transição de estado OU a cada 24h.
+    // Evita spam quando redeploy/ciclo 4h bate enquanto conta tá bloqueada.
+    const shouldAlert = await shouldSendStateAlert("agent_skipped", account.status_key);
+    if (shouldAlert) {
+      try {
+        await sendNotification("alert_critical", {
+          type: "AGENTE SKIPADO",
+          detail: `Ad account não-ativo: ${account.status_key}. ${account.message}`,
+          action: "Resolva no Meta Business Settings e o agente volta automaticamente.",
+        });
+      } catch { /* swallow */ }
+    }
     return;
   }
+
+  // Conta ativa → limpa dedup pra garantir alerta na próxima transição ruim.
+  await resetStateAlert("agent_skipped");
 
   const config = await getAutomationConfig();
   const adsets = await getActiveAdsetMetrics();

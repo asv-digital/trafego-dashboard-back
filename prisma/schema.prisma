@@ -297,6 +297,14 @@ model AgentHeartbeat {
   updatedAt           DateTime  @updatedAt
 }
 
+// Edge-triggered dedup para alertas de estado estacionário.
+// Ver src/lib/alert-dedup.ts — só envia se (state mudou) OU (lastSentAt > 24h).
+model AlertDedup {
+  key        String   @id
+  lastState  String
+  lastSentAt DateTime @default(now())
+}
+
 // Ponto 9: CPM Trend
 model CPMTrend {
   id               String   @id @default(uuid())

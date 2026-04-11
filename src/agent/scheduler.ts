@@ -15,6 +15,7 @@ import { checkLookalikeCreation } from "../services/audience-builder";
 import { NET_PER_SALE } from "../config/constants";
 import { nextHourBRT } from "../lib/tz";
 import { getAccountStatus } from "../lib/meta-account";
+import { shouldSendStateAlert, resetStateAlert } from "../lib/alert-dedup";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -374,17 +375,26 @@ function scheduleCreativeStockCheck(): void {
     try {
       const stock = await checkCreativeStock();
       if (stock.alert_level === "critical") {
-        await sendNotification("alert_critical", {
-          type: "ESTOQUE DE CRIATIVOS CRITICO",
-          detail: `Apenas ${stock.healthy_count} criativo(s) saudavel(is). Operacao pode parar em ${stock.days_until_crisis} dias.`,
-          action: stock.recommendation,
-        });
+        // Edge-triggered: só alerta na transição healthy/warning → critical
+        // OU a cada 24h (fallback). Evita spam enquanto estoque continuar zero.
+        const shouldAlert = await shouldSendStateAlert("creative_stock", "critical");
+        if (shouldAlert) {
+          await sendNotification("alert_critical", {
+            type: "ESTOQUE DE CRIATIVOS CRITICO",
+            detail: `Apenas ${stock.healthy_count} criativo(s) saudavel(is). Operacao pode parar em ${stock.days_until_crisis} dias.`,
+            action: stock.recommendation,
+          });
+        }
       } else if (stock.alert_level === "warning") {
+        await resetStateAlert("creative_stock");
         await sendNotification("auto_action", {
           action: "ALERTA CRIATIVOS",
           adset: "Geral",
           reason: stock.recommendation,
         });
+      } else {
+        // Estoque saudável — reset garante alerta na próxima transição pra critical.
+        await resetStateAlert("creative_stock");
       }
     } catch (err) {
       console.error(`[Scheduler] Erro na verificacao de criativos: ${err instanceof Error ? err.message : String(err)}`);
@@ -432,6 +442,8 @@ async function checkAccountTransition(): Promise<void> {
     if (lastKnownActive === false && status.active === true) {
       // Transição !active → active. Avisa!
       console.log(`[AccountWatcher] TRANSIÇÃO → ATIVA (${status.status_key})`);
+      // Reset dedup pra que a próxima transição → bloqueado volte a alertar.
+      await resetStateAlert("agent_skipped");
       await sendNotification("account_restored", {
         name: status.name || "conta",
         previous_status: "bloqueada",
