@@ -45,6 +45,22 @@ const NOTIFICATION_TEMPLATES: Record<string, (data: any) => string> = {
     `Prejuízo estimado: R$${data.loss}\n\n` +
     `_Pausado automaticamente. Ad set estava dando prejuízo._`,
 
+  account_restored: (data) =>
+    `🟢 *CONTA META LIBERADA*\n\n` +
+    `Conta: ${data.name}\n` +
+    `Status anterior: ${data.previous_status}\n` +
+    `Status atual: ativa\n\n` +
+    `✅ Pedro Sobral já pode lançar. launch_ready=true.\n\n` +
+    `_Acesse trafego.bravy.com.br → aba Lancar._`,
+
+  account_blocked: (data) =>
+    `🔴 *CONTA META BLOQUEADA*\n\n` +
+    `Conta: ${data.name}\n` +
+    `Status: ${data.status_key}\n` +
+    `Motivo: ${data.message}\n\n` +
+    `⛔ Launches e automações suspensas até resolver.\n\n` +
+    `_Resolva no Meta Business Settings._`,
+
   test: () =>
     `✅ Teste de conexão — trafego.bravy.com.br\n\n_Notificações WhatsApp funcionando._`,
 };
@@ -61,6 +77,7 @@ export async function sendNotification(type: string, data: any = {}): Promise<bo
   if (type === "creative_distributed" && !config.notifyCreativeActions) return false;
   if (type === "learning_phase_exit" && !config.notifyLearningPhase) return false;
   if (type === "alert_critical" && !config.notifyAlerts) return false;
+  if ((type === "account_blocked" || type === "account_restored") && !config.notifyAlerts) return false;
   if (type === "daily_summary" && !config.notifyDailySummary) return false;
 
   const template = NOTIFICATION_TEMPLATES[type];

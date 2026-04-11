@@ -14,6 +14,7 @@ import { collectAdComments, analyzeComments, generateCommentSummaries } from "..
 import { checkLookalikeCreation } from "../services/audience-builder";
 import { NET_PER_SALE } from "../config/constants";
 import { nextHourBRT } from "../lib/tz";
+import { getAccountStatus } from "../lib/meta-account";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -358,6 +359,9 @@ export function startScheduler(): void {
 
   // Lookalike creation check: daily at 10am (Ponto 11)
   scheduleLookalikeCheck();
+
+  // Account status watcher: poll 60s, notify WhatsApp on active/blocked transitions
+  startAccountStatusWatcher();
 }
 
 function scheduleCreativeStockCheck(): void {
@@ -407,6 +411,55 @@ function scheduleCommentAnalysis(): void {
     }
     scheduleCommentAnalysis();
   }, msUntil);
+}
+
+// ── Account Status Watcher — poll 60s, notify on transition ─
+
+let lastKnownActive: boolean | null = null;
+let accountWatcherHandle: ReturnType<typeof setInterval> | null = null;
+
+async function checkAccountTransition(): Promise<void> {
+  try {
+    const status = await getAccountStatus(true); // force refresh, bypass cache
+
+    if (lastKnownActive === null) {
+      // Primeira observação — só inicializa o estado, não notifica.
+      lastKnownActive = status.active;
+      console.log(`[AccountWatcher] Estado inicial: ${status.status_key} (active=${status.active})`);
+      return;
+    }
+
+    if (lastKnownActive === false && status.active === true) {
+      // Transição !active → active. Avisa!
+      console.log(`[AccountWatcher] TRANSIÇÃO → ATIVA (${status.status_key})`);
+      await sendNotification("account_restored", {
+        name: status.name || "conta",
+        previous_status: "bloqueada",
+      });
+    } else if (lastKnownActive === true && status.active === false) {
+      // Transição active → !active. Avisa também (dead man's switch pra novo bloqueio).
+      console.log(`[AccountWatcher] TRANSIÇÃO → BLOQUEADA (${status.status_key})`);
+      await sendNotification("account_blocked", {
+        name: status.name || "conta",
+        status_key: status.status_key,
+        message: status.message,
+      });
+    }
+
+    lastKnownActive = status.active;
+  } catch (err) {
+    console.error(`[AccountWatcher] Erro: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function startAccountStatusWatcher(): void {
+  console.log("[Scheduler] Account status watcher — poll 60s, notifica transições.");
+  // Rodar imediatamente pra inicializar estado
+  checkAccountTransition().catch(() => { /* swallow */ });
+  // Depois a cada 60s
+  accountWatcherHandle = setInterval(() => {
+    checkAccountTransition().catch(() => { /* swallow */ });
+  }, 60 * 1000);
 }
 
 // ── Lookalike Check (Ponto 11) — daily at 10am ─────────────
