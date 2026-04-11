@@ -26,6 +26,8 @@ router.post("/run", async (_req: Request, res: Response) => {
 router.get("/config", (_req: Request, res: Response) => {
   const metaToken = process.env.META_ACCESS_TOKEN || "";
   const metaAccount = process.env.META_AD_ACCOUNT_ID || "";
+  const metaPixel = process.env.META_PIXEL_ID || "";
+  const metaPage = process.env.META_PAGE_ID || "";
   const kirvanoKey = process.env.KIRVANO_WEBHOOK_TOKEN || "";
 
   res.json({
@@ -43,6 +45,9 @@ router.get("/config", (_req: Request, res: Response) => {
     meta: {
       ad_account_id: metaAccount,
       configured: metaToken !== "" && metaAccount !== "",
+      has_pixel: metaPixel !== "",
+      has_page: metaPage !== "",
+      launch_ready: metaToken !== "" && metaAccount !== "" && metaPixel !== "" && metaPage !== "",
     },
     kirvano: {
       configured: kirvanoKey !== "",
