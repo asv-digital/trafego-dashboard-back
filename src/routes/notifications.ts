@@ -101,4 +101,83 @@ router.post("/test", async (_req: Request, res: Response) => {
   });
 });
 
+// GET /health — Saúde do canal de notificação.
+// Polado pelo frontend a cada 60s. Se "degraded" ou "critical", o dashboard
+// mostra um banner vermelho fixo no topo — garante visibilidade do problema
+// mesmo se o próprio WhatsApp estiver quebrado.
+router.get("/health", async (_req: Request, res: Response) => {
+  const now = new Date();
+  const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  const [lastSuccess, recentLogs] = await Promise.all([
+    prisma.notificationLog.findFirst({
+      where: { status: "sent" },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    }),
+    prisma.notificationLog.findMany({
+      where: { createdAt: { gte: twentyFourHoursAgo } },
+      orderBy: { createdAt: "desc" },
+      select: { status: true, createdAt: true, type: true },
+    }),
+  ]);
+
+  const sentLast24h = recentLogs.filter((l) => l.status === "sent").length;
+  const failedLast24h = recentLogs.filter((l) => l.status === "failed").length;
+
+  // Streak de falhas consecutivas desde a última tentativa (ordenado desc).
+  let consecutiveFailures = 0;
+  for (const log of recentLogs) {
+    if (log.status === "failed") {
+      consecutiveFailures++;
+    } else {
+      break;
+    }
+  }
+
+  const hoursSinceLastSuccess = lastSuccess
+    ? (now.getTime() - lastSuccess.createdAt.getTime()) / (1000 * 60 * 60)
+    : null;
+
+  // Regras de status:
+  // - critical: 3+ falhas consecutivas OU nenhum sucesso em 12h (mesmo sem falhas recentes — canal mudo)
+  // - warning: 1-2 falhas consecutivas OU nenhum sucesso em 6h
+  // - healthy: caso contrário
+  let status: "healthy" | "warning" | "critical";
+  let reason: string;
+
+  if (consecutiveFailures >= 3) {
+    status = "critical";
+    reason = `${consecutiveFailures} falhas consecutivas no envio`;
+  } else if (hoursSinceLastSuccess !== null && hoursSinceLastSuccess > 12) {
+    status = "critical";
+    reason = `nenhuma notificação entregue há ${hoursSinceLastSuccess.toFixed(1)}h`;
+  } else if (hoursSinceLastSuccess === null && recentLogs.length === 0) {
+    // Sem histórico nenhum — pode ser sistema novo, não é alarme.
+    status = "healthy";
+    reason = "sem histórico de notificações ainda";
+  } else if (consecutiveFailures >= 1) {
+    status = "warning";
+    reason = `${consecutiveFailures} falha(s) recente(s)`;
+  } else if (hoursSinceLastSuccess !== null && hoursSinceLastSuccess > 6) {
+    status = "warning";
+    reason = `última entrega há ${hoursSinceLastSuccess.toFixed(1)}h`;
+  } else {
+    status = "healthy";
+    reason = hoursSinceLastSuccess !== null
+      ? `última entrega há ${hoursSinceLastSuccess.toFixed(1)}h`
+      : "canal ativo";
+  }
+
+  res.json({
+    status,
+    reason,
+    last_success_at: lastSuccess?.createdAt.toISOString() ?? null,
+    hours_since_last_success: hoursSinceLastSuccess !== null ? parseFloat(hoursSinceLastSuccess.toFixed(2)) : null,
+    sent_last_24h: sentLast24h,
+    failed_last_24h: failedLast24h,
+    consecutive_failures: consecutiveFailures,
+  });
+});
+
 export default router;
