@@ -4,10 +4,13 @@ import prisma from "../prisma";
 
 const router = Router();
 
-const WEBHOOK_TOKEN = process.env.KIRVANO_WEBHOOK_TOKEN || "";
-const PRODUCT_ID = process.env.KIRVANO_PRODUCT_ID || "";
-const META_PIXEL_ID = process.env.META_PIXEL_ID || "";
-const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN || "";
+// NÃO capture process.env no module load — dotenv pode ainda não ter carregado,
+// e rotação de token/secret em runtime ficaria invisível até restart. Usa
+// getters que resolvem a cada chamada.
+const getWebhookToken = () => process.env.KIRVANO_WEBHOOK_TOKEN || "";
+const getProductId = () => process.env.KIRVANO_PRODUCT_ID || "";
+const getMetaPixelId = () => process.env.META_PIXEL_ID || "";
+const getMetaAccessToken = () => process.env.META_ACCESS_TOKEN || "";
 
 import { PRODUCT_PRICE, KIRVANO_FEE_RATE, NET_PER_SALE } from "../config/constants";
 
@@ -108,8 +111,8 @@ async function sendCapiPurchaseEvent(sale: {
   customerFirstName?: string | null;
   customerLastName?: string | null;
 }): Promise<boolean> {
-  if (!META_PIXEL_ID || !META_ACCESS_TOKEN) {
-    console.log("CAPI: skipped — META_PIXEL_ID or META_ACCESS_TOKEN not set");
+  if (!getMetaPixelId() || !getMetaAccessToken()) {
+    console.log("CAPI: skipped — getMetaPixelId() or getMetaAccessToken() not set");
     return false;
   }
 
@@ -153,10 +156,10 @@ async function sendCapiPurchaseEvent(sale: {
           },
         },
       ],
-      access_token: META_ACCESS_TOKEN,
+      access_token: getMetaAccessToken(),
     };
 
-    const url = `https://graph.facebook.com/v19.0/${META_PIXEL_ID}/events`;
+    const url = `https://graph.facebook.com/v19.0/${getMetaPixelId()}/events`;
 
     const response = await fetch(url, {
       method: "POST",
@@ -187,7 +190,7 @@ async function sendCapiPurchaseEvent(sale: {
 
 async function addBuyerToCustomAudience(email: string, phone?: string) {
   const audienceId = process.env.META_BUYERS_AUDIENCE_ID;
-  if (!audienceId || !META_ACCESS_TOKEN) return;
+  if (!audienceId || !getMetaAccessToken()) return;
 
   try {
     const schema = phone ? ["EMAIL", "PHONE"] : ["EMAIL"];
@@ -200,7 +203,7 @@ async function addBuyerToCustomAudience(email: string, phone?: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         payload: { schema, data },
-        access_token: META_ACCESS_TOKEN,
+        access_token: getMetaAccessToken(),
       }),
     });
     console.log(`[Webhook] Comprador adicionado ao Custom Audience`);
@@ -222,15 +225,15 @@ async function sendCAPIEvent(eventData: {
   custom_data: Record<string, any>;
   action_source: string;
 }): Promise<boolean> {
-  if (!META_PIXEL_ID || !META_ACCESS_TOKEN) return false;
+  if (!getMetaPixelId() || !getMetaAccessToken()) return false;
 
   try {
-    const res = await fetch(`https://graph.facebook.com/v19.0/${META_PIXEL_ID}/events`, {
+    const res = await fetch(`https://graph.facebook.com/v19.0/${getMetaPixelId()}/events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         data: [eventData],
-        access_token: META_ACCESS_TOKEN,
+        access_token: getMetaAccessToken(),
       }),
     });
 
@@ -254,7 +257,7 @@ async function sendCAPIEvent(eventData: {
 
 async function addAbandonerToCustomAudience(email: string, phone?: string) {
   const audienceId = process.env.META_AUDIENCE_ABANDONERS_ID;
-  if (!audienceId || !META_ACCESS_TOKEN) return;
+  if (!audienceId || !getMetaAccessToken()) return;
 
   try {
     const schema = phone ? ["EMAIL", "PHONE"] : ["EMAIL"];
@@ -267,7 +270,7 @@ async function addAbandonerToCustomAudience(email: string, phone?: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         payload: { schema, data },
-        access_token: META_ACCESS_TOKEN,
+        access_token: getMetaAccessToken(),
       }),
     });
     console.log("[AUDIENCE] Abandonador adicionado ao Custom Audience");
@@ -630,7 +633,7 @@ router.post("/kirvano", async (req: Request, res: Response) => {
   try {
     // Validate token
     const token = req.headers["x-webhook-token"] || req.body?.token;
-    if (WEBHOOK_TOKEN && token !== WEBHOOK_TOKEN) {
+    if (getWebhookToken() && token !== getWebhookToken()) {
       res.status(401).json({ error: "Invalid token" });
       return;
     }
@@ -643,8 +646,8 @@ router.post("/kirvano", async (req: Request, res: Response) => {
 
     // Product filter (optional — only reject if product ID is present and different)
     const productId = payload.product?.id || payload.produto?.id || payload.product_id;
-    if (PRODUCT_ID && productId && productId !== PRODUCT_ID) {
-      console.log(`[Webhook] Ignored: product ${productId} !== ${PRODUCT_ID}`);
+    if (getProductId() && productId && productId !== getProductId()) {
+      console.log(`[Webhook] Ignored: product ${productId} !== ${getProductId()}`);
       res.json({ received: true, action: "ignored", reason: "different_product" });
       return;
     }

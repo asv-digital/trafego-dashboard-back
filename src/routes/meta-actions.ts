@@ -23,7 +23,9 @@ function getMetaConfig() {
   }
 }
 
-const { access_token, ad_account_id } = getMetaConfig();
+// NÃO destrutura no module load — env vars podem ainda não ter sido carregadas
+// pelo dotenv nesse momento (timing de import vs config). Cada chamada resolve
+// via getMetaConfig() pra sempre pegar o valor mais atual do process.env.
 
 // ---------------------------------------------------------------------------
 // Naming Convention Helpers
@@ -70,6 +72,8 @@ interface MetaError {
 }
 
 async function metaPost(endpoint: string, params: Record<string, string>) {
+  const { access_token } = getMetaConfig();
+  if (!access_token) throw { status: 500, message: "META_ACCESS_TOKEN não configurado" };
   const url = new URL(`${META_BASE}/${endpoint}`);
   url.searchParams.set("access_token", access_token);
 
@@ -91,6 +95,8 @@ async function metaPost(endpoint: string, params: Record<string, string>) {
 }
 
 async function metaGet(endpoint: string, params: Record<string, string> = {}) {
+  const { access_token } = getMetaConfig();
+  if (!access_token) throw { status: 500, message: "META_ACCESS_TOKEN não configurado" };
   const url = new URL(`${META_BASE}/${endpoint}`);
   url.searchParams.set("access_token", access_token);
 
@@ -121,7 +127,7 @@ router.post("/campaigns/create", async (req: Request, res: Response) => {
 
     console.log(`[meta-actions] Creating campaign: ${finalName}`);
 
-    const data = await metaPost(`${ad_account_id}/campaigns`, {
+    const data = await metaPost(`${getMetaConfig().ad_account_id}/campaigns`, {
       name: finalName,
       objective,
       status: status || "PAUSED",
@@ -182,7 +188,7 @@ router.post("/adsets/create", async (req: Request, res: Response) => {
       targeting: typeof targeting === "string" ? targeting : JSON.stringify(targeting),
     };
 
-    const data = await metaPost(`${ad_account_id}/adsets`, params);
+    const data = await metaPost(`${getMetaConfig().ad_account_id}/adsets`, params);
 
     console.log(`[meta-actions] Ad set created: ${(data as Record<string, unknown>).id}`);
     res.status(201).json(data);
@@ -287,7 +293,7 @@ router.get("/campaigns/live", async (_req: Request, res: Response) => {
   try {
     console.log("[meta-actions] Fetching live campaigns");
 
-    const data = await metaGet(`${ad_account_id}/campaigns`, {
+    const data = await metaGet(`${getMetaConfig().ad_account_id}/campaigns`, {
       fields:
         "id,name,status,daily_budget,lifetime_budget,objective,created_time",
     });
@@ -307,7 +313,7 @@ router.get("/adsets/live", async (_req: Request, res: Response) => {
   try {
     console.log("[meta-actions] Fetching live ad sets");
 
-    const data = await metaGet(`${ad_account_id}/adsets`, {
+    const data = await metaGet(`${getMetaConfig().ad_account_id}/adsets`, {
       fields:
         "id,name,campaign_id,status,daily_budget,targeting,optimization_goal",
     });
@@ -327,7 +333,7 @@ router.get("/insights/realtime", async (_req: Request, res: Response) => {
   try {
     console.log("[meta-actions] Fetching realtime insights");
 
-    const data = await metaGet(`${ad_account_id}/insights`, {
+    const data = await metaGet(`${getMetaConfig().ad_account_id}/insights`, {
       fields:
         "campaign_name,campaign_id,spend,impressions,clicks,actions,cpm,cpc,ctr,frequency",
       date_preset: "today",
@@ -353,7 +359,7 @@ router.get("/insights/range", async (req: Request, res: Response) => {
 
     console.log(`[meta-actions] Fetching insights range: ${since} to ${until} (${level})`);
 
-    const data = await metaGet(`${ad_account_id}/insights`, {
+    const data = await metaGet(`${getMetaConfig().ad_account_id}/insights`, {
       fields:
         "campaign_name,campaign_id,spend,impressions,clicks,actions,cpm,cpc,ctr,frequency",
       time_range: JSON.stringify({ since, until }),
@@ -379,7 +385,7 @@ router.get("/insights/pacing", async (_req: Request, res: Response) => {
   try {
     console.log("[meta-actions] Fetching pacing insights");
 
-    const data = await metaGet(`${ad_account_id}/insights`, {
+    const data = await metaGet(`${getMetaConfig().ad_account_id}/insights`, {
       fields: "spend",
       date_preset: "today",
       level: "account",

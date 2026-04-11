@@ -7,6 +7,9 @@ interface Alert {
   level: "critical" | "red" | "yellow" | "green";
   campaign: string;
   campaignId: string;
+  // Meta campaign id — usado pelo frontend pra pausar via Meta Graph API.
+  // Pode ser null se a campanha nunca foi lançada no Meta (apenas no DB).
+  metaCampaignId: string | null;
   adSet?: string;
   message: string;
   action: string;
@@ -56,6 +59,7 @@ router.get("/", async (_req: Request, res: Response) => {
         level: "critical",
         campaign: campaign.name,
         campaignId: campaign.id,
+        metaCampaignId: campaign.metaCampaignId ?? null,
         message: `Gasto R$${latest.investment.toFixed(2)} sem nenhuma venda`,
         action: "Pausar imediatamente este conjunto de anúncios.",
       });
@@ -72,6 +76,7 @@ router.get("/", async (_req: Request, res: Response) => {
           level: "red",
           campaign: campaign.name,
           campaignId: campaign.id,
+          metaCampaignId: campaign.metaCampaignId ?? null,
           message: `CPA acima de R$${thresholds.cpaPauseThreshold} por ${thresholds.minDays}+ dias consecutivos (R$${cpa.toFixed(2)})`,
           action: "Matar conjunto. CPA acima do limite sustentado.",
           metric: "CPA",
@@ -86,6 +91,7 @@ router.get("/", async (_req: Request, res: Response) => {
         level: "yellow",
         campaign: campaign.name,
         campaignId: campaign.id,
+        metaCampaignId: campaign.metaCampaignId ?? null,
         message: `CPA em zona de alerta: R$${cpa.toFixed(2)}`,
         action: "Observar. Testar novos criativos.",
         metric: "CPA",
@@ -104,6 +110,7 @@ router.get("/", async (_req: Request, res: Response) => {
           level: "green",
           campaign: campaign.name,
           campaignId: campaign.id,
+          metaCampaignId: campaign.metaCampaignId ?? null,
           message: `CPA excelente por ${thresholds.minDays}+ dias: R$${cpa.toFixed(2)}`,
           action: "Escalar 20-30% o orçamento.",
           metric: "CPA",
@@ -118,6 +125,7 @@ router.get("/", async (_req: Request, res: Response) => {
         level: "yellow",
         campaign: campaign.name,
         campaignId: campaign.id,
+        metaCampaignId: campaign.metaCampaignId ?? null,
         message: `CTR muito baixo: ${ctr.toFixed(2)}%`,
         action: "Criativo fraco. Trocar hooks e criativos.",
         metric: "CTR",
@@ -131,6 +139,7 @@ router.get("/", async (_req: Request, res: Response) => {
         level: "yellow",
         campaign: campaign.name,
         campaignId: campaign.id,
+        metaCampaignId: campaign.metaCampaignId ?? null,
         message: `CTR alto (${ctr.toFixed(2)}%) mas CPA alto (R$${cpa.toFixed(2)})`,
         action: "LP fraca. Pessoas clicam mas não compram. Revisar página.",
         metric: "CTR+CPA",
@@ -143,6 +152,7 @@ router.get("/", async (_req: Request, res: Response) => {
         level: "red",
         campaign: campaign.name,
         campaignId: campaign.id,
+        metaCampaignId: campaign.metaCampaignId ?? null,
         message: `Frequência muito alta: ${frequency.toFixed(1)}`,
         action: "Criativo saturado. Trocar criativo urgente.",
         metric: "Frequência",
@@ -156,6 +166,7 @@ router.get("/", async (_req: Request, res: Response) => {
         level: "yellow",
         campaign: campaign.name,
         campaignId: campaign.id,
+        metaCampaignId: campaign.metaCampaignId ?? null,
         message: `CPM muito alto: R$${cpm.toFixed(2)}`,
         action: "Público pequeno demais. Expandir audiência.",
         metric: "CPM",

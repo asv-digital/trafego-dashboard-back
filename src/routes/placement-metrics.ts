@@ -22,13 +22,15 @@ function getMetaConfig() {
   }
 }
 
-const { access_token, ad_account_id } = getMetaConfig();
+// NÃO destrutura no module load — resolve via getMetaConfig() por chamada.
 
 interface MetaError {
   error?: { message: string; type: string; code: number };
 }
 
 async function metaGet(endpoint: string, params: Record<string, string> = {}) {
+  const { access_token } = getMetaConfig();
+  if (!access_token) throw new Error("META_ACCESS_TOKEN não configurado");
   const url = new URL(`${META_BASE}/${endpoint}`);
   url.searchParams.set("access_token", access_token);
 
@@ -62,7 +64,7 @@ router.get("/", async (req: Request, res: Response) => {
   try {
     console.log(`[placement-metrics] Fetching placement breakdown (${datePreset})`);
 
-    const data = await metaGet(`${ad_account_id}/insights`, {
+    const data = await metaGet(`${getMetaConfig().ad_account_id}/insights`, {
       fields: "impressions,spend,cpm,clicks,actions,outbound_clicks",
       breakdowns: "publisher_platform,platform_position",
       date_preset: datePreset,

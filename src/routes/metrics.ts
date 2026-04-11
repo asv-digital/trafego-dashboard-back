@@ -393,6 +393,8 @@ router.get("/scaling-rules", async (_req: Request, res: Response) => {
 
         return {
           campaign_id: campaign.id,
+          // Meta id pra que o frontend consiga executar ações via Meta Graph
+          meta_campaign_id: campaign.metaCampaignId ?? null,
           campaign_name: campaign.name,
           status: campaign.status,
           days_analyzed: daysWithData,
