@@ -144,6 +144,31 @@ router.get("/meta-account-info", async (req: Request, res: Response) => {
   out.configured_page_id = process.env.META_PAGE_ID || null;
   out.configured_page_id_length = (process.env.META_PAGE_ID || "").length;
 
+  // Olhar ads existentes pra descobrir quais Page IDs estão em uso neste ad account.
+  // Mais confiável que /me/accounts porque funciona pra System User sem page perms.
+  try {
+    const r6 = await fetch(
+      `${base}/${account}/ads?fields=id,name,creative{id,object_story_spec{page_id,instagram_actor_id}}&limit=25&access_token=${encodeURIComponent(token)}`
+    );
+    const raw = (await r6.json()) as any;
+    const pageIds = new Set<string>();
+    const instagramIds = new Set<string>();
+    if (raw?.data && Array.isArray(raw.data)) {
+      for (const ad of raw.data) {
+        const pid = ad?.creative?.object_story_spec?.page_id;
+        const iid = ad?.creative?.object_story_spec?.instagram_actor_id;
+        if (pid) pageIds.add(pid);
+        if (iid) instagramIds.add(iid);
+      }
+    }
+    out.pages_in_use_by_ads = Array.from(pageIds);
+    out.instagram_actors_in_use_by_ads = Array.from(instagramIds);
+    out.ads_sampled = raw?.data?.length ?? 0;
+    if (raw?.error) out.ads_error = raw.error;
+  } catch (err) {
+    out.ads_error = (err as Error).message;
+  }
+
   return res.json(out);
 });
 
