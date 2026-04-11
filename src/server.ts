@@ -23,6 +23,7 @@ import automationLocksRoutes from "./routes/automation-locks";
 import commentsRoutes from "./routes/comments";
 import audiencesRoutes from "./routes/audiences";
 import reportsRoutes from "./routes/reports";
+import adminRoutes from "./routes/admin";
 import { startScheduler } from "./agent/scheduler";
 
 const app = express();
@@ -54,6 +55,7 @@ app.use("/api/automations", automationLocksRoutes);
 app.use("/api/comments", commentsRoutes);
 app.use("/api/audiences", audiencesRoutes);
 app.use("/api/reports", reportsRoutes);
+app.use("/api/admin", adminRoutes);
 
 // Health check (Melhoria 19)
 app.get("/api/health", async (_req, res) => {
