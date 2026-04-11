@@ -399,14 +399,18 @@ async function createSale(payload: any, status: string) {
   const checkoutId = extractCheckoutId(payload);
   const saleDate = new Date(payload.created_at || payload.data_criacao || new Date());
 
-  // Check for duplicate
+  // Check for duplicate — retorna isNew:false pra que handlers saibam que
+  // não devem re-disparar side effects (CAPI, custom audience, incrementDailyMetrics).
+  // Antes, retornávamos só o Sale e os handlers ficavam reenviando tudo —
+  // duplicava Purchase no Ads Manager e inflava métricas locais.
   const existingSale = await prisma.sale.findUnique({ where: { kirvanoTxId: txId } });
   if (existingSale) {
     console.log(`[Webhook] Sale already exists for txId=${txId}, updating status to ${status}`);
-    return prisma.sale.update({
+    const updated = await prisma.sale.update({
       where: { kirvanoTxId: txId },
       data: { status },
     });
+    return { sale: updated, isNew: false };
   }
 
   const campaignId = await matchCampaign(utm.utmCampaign);
@@ -432,7 +436,7 @@ async function createSale(payload: any, status: string) {
   });
 
   console.log(`[Webhook] Sale created: id=${sale.id} txId=${txId} status=${status}`);
-  return sale;
+  return { sale, isNew: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +444,23 @@ async function createSale(payload: any, status: string) {
 // ---------------------------------------------------------------------------
 
 async function handleApproved(payload: any, res: Response) {
-  const sale = await createSale(payload, "approved");
+  const { sale, isNew } = await createSale(payload, "approved");
+
+  // Idempotência completa: se webhook é duplicado (Kirvano retry comum),
+  // NÃO dispara CAPI, NÃO adiciona ao custom audience, NÃO incrementa métricas.
+  // Antes, só a tabela Sale era idempotente — resto duplicava silenciosamente,
+  // corrompendo métricas do Meta Ads Manager e do DB local.
+  if (!isNew) {
+    const alreadySent = sale.capiSent ?? false;
+    console.log(`[Webhook] Duplicate approved webhook for ${sale.kirvanoTxId} — skipping side effects (capi_already_sent=${alreadySent})`);
+    res.json({
+      received: true,
+      action: "duplicate_ignored",
+      saleId: sale.id,
+      capiAlreadySent: alreadySent,
+    });
+    return;
+  }
 
   // Send CAPI Purchase event (Melhoria 1)
   const capiSent = await sendCapiPurchaseEvent({
@@ -577,8 +597,15 @@ async function handleCartAbandoned(payload: any, res: Response) {
 }
 
 async function handlePendingPayment(payload: any, status: string, res: Response) {
-  const sale = await createSale(payload, status);
+  const { sale, isNew } = await createSale(payload, status);
   const customer = extractCustomer(payload);
+
+  // Se duplicado, não reenviar InitiateCheckout (evita duplo evento no Meta)
+  if (!isNew) {
+    console.log(`[Webhook] Duplicate pending webhook for ${sale.kirvanoTxId} — skipping InitiateCheckout`);
+    res.json({ received: true, action: "duplicate_ignored", saleId: sale.id });
+    return;
+  }
 
   // Ponto 4: Enviar InitiateCheckout via CAPI (se não veio de cart_abandoned recente)
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000);
@@ -620,7 +647,7 @@ async function handleExpired(payload: any, res: Response) {
 }
 
 async function handleRefused(payload: any, res: Response) {
-  const sale = await createSale(payload, "refused");
+  const { sale } = await createSale(payload, "refused");
   console.log(`[Webhook] Sale refused: txId=${sale.kirvanoTxId}`);
   res.json({ received: true, action: "sale_refused", saleId: sale.id });
 }

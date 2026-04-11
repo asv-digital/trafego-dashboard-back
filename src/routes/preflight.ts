@@ -255,7 +255,88 @@ router.get("/", async (_req: Request, res: Response) => {
     });
   }
 
-  // 10. Campaign Builder templates carregam
+  // 10. Custom audience de COMPRADORES — exclusão crítica em Prospecção LAL.
+  //     Regra Pedro Sobral: NUNCA mostrar anúncio de prospecção pra quem já
+  //     comprou. Sem essa audience, LAL queima budget em buyers.
+  const buyersAudienceId = process.env.META_BUYERS_AUDIENCE_ID || process.env.META_AUDIENCE_BUYERS_ID || "";
+  if (buyersAudienceId && token) {
+    try {
+      const data = await fetchJson(`${META_BASE}/${buyersAudienceId}?fields=id,name,approximate_count_lower_bound,subtype&access_token=${encodeURIComponent(token)}`);
+      if (data.error) {
+        checks.push({
+          name: "buyers_audience",
+          critical: true,
+          passed: false,
+          details: `Audience ID configurado mas Meta retornou: ${data.error.message}`,
+          fix: "Verificar se audience existe e token tem permissão",
+        });
+      } else {
+        checks.push({
+          name: "buyers_audience",
+          critical: true,
+          passed: true,
+          details: `${data.name} id=${data.id}${data.approximate_count_lower_bound != null ? ` (~${data.approximate_count_lower_bound} pessoas)` : ""}`,
+        });
+      }
+    } catch (err) {
+      checks.push({
+        name: "buyers_audience",
+        critical: true,
+        passed: false,
+        details: `Erro: ${(err as Error).message}`,
+      });
+    }
+  } else {
+    checks.push({
+      name: "buyers_audience",
+      critical: true,
+      passed: false,
+      details: "META_BUYERS_AUDIENCE_ID não configurado",
+      fix: "Criar Custom Audience 'Compradores' no Meta Events Manager (Pixel Purchase, 180 dias) e setar env var",
+    });
+  }
+
+  // 11. Custom audience de ABANDONADORES — usada pelo template REMARKETING.
+  //     Sem isso, REMARKETING falha na criação (backend exige o audience ID).
+  const abandonersAudienceId = process.env.META_AUDIENCE_ABANDONERS_ID || "";
+  if (abandonersAudienceId && token) {
+    try {
+      const data = await fetchJson(`${META_BASE}/${abandonersAudienceId}?fields=id,name,approximate_count_lower_bound,subtype&access_token=${encodeURIComponent(token)}`);
+      if (data.error) {
+        checks.push({
+          name: "abandoners_audience",
+          critical: true,
+          passed: false,
+          details: `Audience ID configurado mas Meta retornou: ${data.error.message}`,
+          fix: "Verificar se audience existe e token tem permissão",
+        });
+      } else {
+        checks.push({
+          name: "abandoners_audience",
+          critical: true,
+          passed: true,
+          details: `${data.name} id=${data.id}${data.approximate_count_lower_bound != null ? ` (~${data.approximate_count_lower_bound} pessoas)` : ""}`,
+        });
+      }
+    } catch (err) {
+      checks.push({
+        name: "abandoners_audience",
+        critical: true,
+        passed: false,
+        details: `Erro: ${(err as Error).message}`,
+      });
+    }
+  } else {
+    checks.push({
+      name: "abandoners_audience",
+      critical: true,
+      passed: false,
+      details: "META_AUDIENCE_ABANDONERS_ID não configurado",
+      fix: "Criar Custom Audience 'Abandonadores' (InitiateCheckout/ViewContent 7d) e setar env var",
+    });
+  }
+
+  // 12. Campaign Builder templates carregam
   try {
     const tpl = await import("../config/campaign-templates");
     const keys = Object.keys(tpl.CAMPAIGN_TEMPLATES ?? {});

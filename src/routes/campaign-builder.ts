@@ -928,9 +928,29 @@ router.post("/launch", async (req: Request, res: Response) => {
     }
     addStep("save_db", "ok", "Campanha salva no banco");
   } catch (err) {
-    addStep("save_db", "error", `Erro ao salvar no banco: ${(err as Error).message} (campanha ativa no Meta)`);
-    log(`ERRO ao salvar no banco: ${(err as Error).message}`);
-    // Não falha totalmente — a campanha está no Meta, só não foi salva no banco
+    // LOUD FAIL: campanha ficou ativa no Meta mas não está no DB.
+    // Se não falhar aqui, o agente NÃO monitora a campanha (sem learning phase
+    // lock, auto-pause, auto-scale, A/B resolver) — risco real de R$500/dia
+    // rodando cego. Melhor retornar 500 e forçar o operador a pausar manualmente
+    // + investigar antes de reativar.
+    const errMsg = (err as Error).message;
+    addStep("save_db", "error", `Erro ao salvar no banco: ${errMsg}`);
+    log(`ERRO CRITICO ao salvar no banco: ${errMsg} — CAMPANHA FICOU ATIVA NO META SEM MONITORAMENTO`);
+    try {
+      await sendNotification("alert_critical", {
+        type: "CAMPANHA ORFA",
+        detail: `Campanha ${created.campaignId} (${finalCampaignName}) ativa no Meta sem registro no DB. Agente NAO vai monitorar.`,
+        action: "PAUSAR MANUALMENTE no Ads Manager ou corrigir DB imediatamente.",
+      });
+    } catch { /* swallow */ }
+    res.status(500).json({
+      success: false,
+      error: `Campanha criada no Meta (id=${created.campaignId}) mas falhou ao persistir no banco. Agente NAO vai monitorar.`,
+      hint: "Pause a campanha no Ads Manager AGORA. Depois investigue o erro de DB e reative.",
+      partial_results: created,
+      steps, log: requestLog
+    });
+    return;
   }
 
   // ── STEP 9: Log + Notificação ──
