@@ -96,6 +96,22 @@ export async function sendNotification(type: string, data: any = {}): Promise<bo
           body: JSON.stringify({ phone, message }),
         }
       );
+    } else if (config.whatsappProvider === "zappfy") {
+      // Zappfy — https://docs.zappfy.io
+      // POST /send/text?token=TOKEN body { number, text, mentionEveryone }
+      const token = config.whatsappToken || process.env.ZAPPFY_TOKEN;
+      if (!token) {
+        throw new Error("Zappfy: token não configurado");
+      }
+
+      response = await fetch(
+        `https://api.zappfy.io/send/text?token=${encodeURIComponent(token)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ number: phone, text: message, mentionEveryone: false }),
+        }
+      );
     } else if (config.whatsappProvider === "evolution") {
       const instanceId = config.whatsappInstanceId || process.env.EVOLUTION_INSTANCE;
       const token = config.whatsappToken || process.env.EVOLUTION_API_KEY;
