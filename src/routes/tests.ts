@@ -3,7 +3,7 @@ import prisma from "../prisma";
 
 const router = Router();
 
-const NET_PER_SALE = 93.6;
+import { NET_PER_SALE } from "../config/constants";
 
 function calcConfidence(
   a: { sales: number; cpa: number },

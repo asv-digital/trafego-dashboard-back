@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import prisma from "../prisma";
+import { NET_PER_SALE } from "../config/constants";
 
 const router = Router();
 
@@ -18,7 +19,7 @@ router.get("/", async (_req: Request, res: Response) => {
     const totalSales = c.metrics.reduce((s, m) => s + m.sales, 0);
     const totalClicks = c.metrics.reduce((s, m) => s + m.clicks, 0);
     const totalImpressions = c.metrics.reduce((s, m) => s + m.impressions, 0);
-    const revenue = totalSales * 93.6;
+    const revenue = totalSales * NET_PER_SALE;
 
     return {
       ...c,

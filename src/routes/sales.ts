@@ -3,8 +3,7 @@ import prisma from "../prisma";
 
 const router = Router();
 
-const PRODUCT_PRICE = 97;
-const NET_PER_SALE = 93.6;
+import { PRODUCT_PRICE, NET_PER_SALE } from "../config/constants";
 
 // GET / — List sales with filters
 router.get("/", async (req: Request, res: Response) => {

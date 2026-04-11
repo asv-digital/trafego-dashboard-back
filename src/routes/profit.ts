@@ -3,9 +3,7 @@ import prisma from "../prisma";
 
 const router = Router();
 
-const PRODUCT_PRICE = 97;
-const NET_PER_SALE = 93.6;
-const KIRVANO_FEE_RATE = 0.035;
+import { PRODUCT_PRICE, NET_PER_SALE, KIRVANO_FEE_RATE } from "../config/constants";
 
 // ---------------------------------------------------------------------------
 // GET / — Profit calculation (Melhoria 28)

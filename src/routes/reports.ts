@@ -3,8 +3,7 @@ import prisma from "../prisma";
 
 const router = Router();
 
-const NET_PER_SALE = 93.6;
-const KIRVANO_FEE_RATE = 0.035;
+import { PRODUCT_PRICE, NET_PER_SALE, KIRVANO_FEE_RATE } from "../config/constants";
 
 function formatBRL(v: number) {
   return `R$${v.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
@@ -56,7 +55,7 @@ router.post("/generate", async (req: Request, res: Response) => {
   // Aggregate current
   const totalInvestment = currentMetrics.reduce((s, m) => s + m.investment, 0);
   const totalSales = currentMetrics.reduce((s, m) => s + m.sales, 0);
-  const grossRevenue = totalSales * 97;
+  const grossRevenue = totalSales * PRODUCT_PRICE;
   const netRevenue = grossRevenue * (1 - KIRVANO_FEE_RATE);
   const profit = netRevenue - totalInvestment;
   const margin = netRevenue > 0 ? (profit / netRevenue) * 100 : 0;
@@ -66,7 +65,7 @@ router.post("/generate", async (req: Request, res: Response) => {
   // Aggregate previous
   const prevInvestment = prevMetrics.reduce((s, m) => s + m.investment, 0);
   const prevSales = prevMetrics.reduce((s, m) => s + m.sales, 0);
-  const prevNetRevenue = prevSales * 97 * (1 - KIRVANO_FEE_RATE);
+  const prevNetRevenue = prevSales * PRODUCT_PRICE * (1 - KIRVANO_FEE_RATE);
   const prevProfit = prevNetRevenue - prevInvestment;
   const prevCpa = prevSales > 0 ? prevInvestment / prevSales : 0;
 
@@ -108,7 +107,7 @@ router.post("/generate", async (req: Request, res: Response) => {
     .reverse()
     .map((c) => ({
       ...c,
-      status: c.cpa > 93.6 ? "Acima do breakeven" : "Acima do limite",
+      status: c.cpa > NET_PER_SALE ? "Acima do breakeven" : "Acima do limite",
     }));
 
   // LTV data
@@ -120,7 +119,7 @@ router.post("/generate", async (req: Request, res: Response) => {
     totalBuyers > 0 ? (totalBuyers * NET_PER_SALE + mentoriaRevenue) / totalBuyers : NET_PER_SALE;
 
   // Score (simplified)
-  const cpaScore = cpa < 50 ? 100 : cpa < 70 ? 60 : cpa < 97 ? 30 : 0;
+  const cpaScore = cpa < 50 ? 100 : cpa < 70 ? 60 : cpa < PRODUCT_PRICE ? 30 : 0;
   const roasScore = roas > 2.5 ? 100 : roas > 2.0 ? 80 : roas > 1.4 ? 50 : roas > 1.0 ? 20 : 0;
   const score = Math.round(cpaScore * 0.5 + roasScore * 0.5);
   const scoreLabel =
@@ -128,7 +127,7 @@ router.post("/generate", async (req: Request, res: Response) => {
   const statusText =
     score >= 60
       ? `Operacao saudavel. ROAS ${roas.toFixed(1)}x com CPA dentro da meta.`
-      : `Operacao precisa de atencao. CPA R$${cpa.toFixed(0)} ${cpa > 93.6 ? "acima do breakeven" : "acima do ideal"}.`;
+      : `Operacao precisa de atencao. CPA R$${cpa.toFixed(0)} ${cpa > NET_PER_SALE ? "acima do breakeven" : "acima do ideal"}.`;
 
   // Daily chart data
   const dailyMap = new Map<string, { spend: number; sales: number; profit: number }>();
@@ -165,7 +164,7 @@ router.post("/generate", async (req: Request, res: Response) => {
       vendas: { value: totalSales, formatted: String(totalSales) },
       cpa: { value: parseFloat(cpa.toFixed(2)), formatted: formatBRL(cpa) },
       roas: { value: parseFloat(roas.toFixed(2)), formatted: `${roas.toFixed(2)}x` },
-      ticket_medio: { value: 97, formatted: "R$97" },
+      ticket_medio: { value: PRODUCT_PRICE, formatted: `R$${PRODUCT_PRICE}` },
     },
     comparison: {
       vs_previous: {
