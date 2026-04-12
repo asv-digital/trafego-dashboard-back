@@ -127,12 +127,15 @@ router.post("/campaigns/create", async (req: Request, res: Response) => {
 
     console.log(`[meta-actions] Creating campaign: ${finalName}`);
 
+    // Meta Graph API exige budget em CENTAVOS (ex: R$150 = 15000).
+    // Frontend envia em reais — converte aqui.
+    const budgetCents = Math.round(Number(daily_budget) * 100);
     const data = await metaPost(`${getMetaConfig().ad_account_id}/campaigns`, {
       name: finalName,
       objective,
       status: status || "PAUSED",
       special_ad_categories: "[]",
-      daily_budget: String(daily_budget),
+      daily_budget: String(budgetCents),
     });
 
     const campaignId = (data as Record<string, unknown>).id as string;
@@ -223,6 +226,37 @@ router.patch("/campaigns/:id/status", async (req: Request, res: Response) => {
   } catch (err: unknown) {
     const error = err as { status?: number; message?: string };
     console.error("[meta-actions] Error updating campaign status:", error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 3b. PATCH /campaigns/:id/budget — Update campaign daily budget
+// ---------------------------------------------------------------------------
+router.patch("/campaigns/:id/budget", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { daily_budget } = req.body;
+
+    // Frontend envia em reais — Meta API exige centavos.
+    const budgetInCents = String(Math.round(Number(daily_budget) * 100));
+
+    console.log(`[meta-actions] Updating campaign ${id} budget to ${budgetInCents} (cents) = R$${daily_budget}`);
+
+    const data = await metaPost(id, { daily_budget: budgetInCents });
+
+    await logAction({
+      action: "budget_update",
+      entityType: "campaign",
+      entityId: id,
+      entityName: id,
+      details: `Daily budget changed to R$${daily_budget} (${budgetInCents} cents)`,
+    });
+
+    res.json(data);
+  } catch (err: unknown) {
+    const error = err as { status?: number; message?: string };
+    console.error("[meta-actions] Error updating campaign budget:", error.message);
     res.status(error.status || 500).json({ error: error.message });
   }
 });
